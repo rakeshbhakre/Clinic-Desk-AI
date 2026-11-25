@@ -9,9 +9,8 @@ from pathlib import Path
 
 from .config import settings
 from .models import Appointment, Doctor, Slot
-from .phone import format_phone
 
-DOCTORS = (
+DEFAULT_DOCTORS = (
     Doctor("d1", "Dr. Anika Mehta", "General Physician"),
     Doctor("d2", "Dr. Rohan Shah", "Dermatology"),
     Doctor("d3", "Dr. Priya Nair", "Pediatrics"),
@@ -42,6 +41,32 @@ def _connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     with _lock, _connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS doctors (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                specialty TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS doctor_slots (
+                slot_id TEXT PRIMARY KEY,
+                doctor_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                available INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(doctor_id, date, time)
+            )
+            """
+        )
+        for doctor in DEFAULT_DOCTORS:
+            conn.execute(
+                "INSERT OR IGNORE INTO doctors (id, name, specialty) VALUES (?, ?, ?)",
+                (doctor.id, doctor.name, doctor.specialty),
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS appointments (
@@ -80,27 +105,155 @@ init_db()
 
 
 def list_doctors() -> list[dict]:
-    return [doctor.to_dict() for doctor in DOCTORS]
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT id, name, specialty FROM doctors ORDER BY id").fetchall()
+    return [Doctor(row["id"], row["name"], row["specialty"]).to_dict() for row in rows]
+
+
+def _ensure_default_day(conn: sqlite3.Connection, doctor_id: str, day: str) -> None:
+    for time in SLOT_TIMES:
+        conn.execute(
+            """INSERT OR IGNORE INTO doctor_slots (slot_id, doctor_id, date, time, available)
+               VALUES (?, ?, ?, ?, 1)""",
+            (f"{doctor_id}-{day}-{time}", doctor_id, day, time),
+        )
+
+
+def _ensure_near_term_schedule(conn: sqlite3.Connection) -> None:
+    today = date.today()
+    doctor_ids = [row["id"] for row in conn.execute("SELECT id FROM doctors")]
+    for offset in range(DAYS_AHEAD):
+        day = (today + timedelta(days=offset)).isoformat()
+        for doctor_id in doctor_ids:
+            has_schedule = conn.execute(
+                "SELECT 1 FROM doctor_slots WHERE doctor_id = ? AND date = ? LIMIT 1",
+                (doctor_id, day),
+            ).fetchone()
+            if not has_schedule:
+                _ensure_default_day(conn, doctor_id, day)
 
 
 def all_slots() -> list[Slot]:
-    today = date.today()
-    slots: list[Slot] = []
-    for day_offset in range(DAYS_AHEAD):
-        day = (today + timedelta(days=day_offset)).isoformat()
-        for doctor in DOCTORS:
-            for time in SLOT_TIMES:
-                slots.append(
-                    Slot(
-                        slot_id=f"{doctor.id}-{day}-{time}",
-                        doctor_id=doctor.id,
-                        doctor_name=doctor.name,
-                        specialty=doctor.specialty,
-                        date=day,
-                        time=time,
-                    )
-                )
-    return slots
+    with _lock, _connect() as conn:
+        _ensure_near_term_schedule(conn)
+        rows = conn.execute(
+            """SELECT s.slot_id, s.doctor_id, d.name AS doctor_name, d.specialty,
+                      s.date, s.time, s.available
+               FROM doctor_slots s JOIN doctors d ON d.id = s.doctor_id
+               WHERE s.available = 1 AND s.date BETWEEN ? AND ?
+               ORDER BY s.date, s.time, d.id""",
+            (date.today().isoformat(), (date.today() + timedelta(days=DAYS_AHEAD - 1)).isoformat()),
+        ).fetchall()
+    return [
+        Slot(
+            slot_id=row["slot_id"],
+            doctor_id=row["doctor_id"],
+            doctor_name=row["doctor_name"],
+            specialty=row["specialty"],
+            date=row["date"],
+            time=row["time"],
+            available=bool(row["available"]),
+        )
+        for row in rows
+    ]
+
+
+def update_doctor(doctor_id: str, name: str, specialty: str) -> dict | None:
+    name = " ".join((name or "").split())
+    specialty = " ".join((specialty or "").split())
+    if not name or not specialty:
+        raise ValueError("Doctor name and specialty are required.")
+    if len(name) > 100 or len(specialty) > 100:
+        raise ValueError("Doctor name and specialty must be 100 characters or fewer.")
+    with _lock, _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE doctors SET name = ?, specialty = ? WHERE id = ?",
+            (name, specialty, doctor_id),
+        )
+        row = conn.execute(
+            "SELECT id, name, specialty FROM doctors WHERE id = ?", (doctor_id,)
+        ).fetchone()
+    return Doctor(row["id"], row["name"], row["specialty"]).to_dict() if row else None
+
+
+def _validated_day(day: str) -> str:
+    try:
+        parsed = date.fromisoformat(day)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Choose a valid date.") from exc
+    if parsed < date.today():
+        raise ValueError("Availability cannot be changed for a past date.")
+    if parsed > date.today() + timedelta(days=DAYS_AHEAD - 1):
+        raise ValueError("Availability can be changed for the next three days.")
+    return parsed.isoformat()
+
+
+def doctor_schedule(doctor_id: str, day: str) -> dict:
+    day = _validated_day(day)
+    with _lock, _connect() as conn:
+        doctor = conn.execute("SELECT id FROM doctors WHERE id = ?", (doctor_id,)).fetchone()
+        if not doctor:
+            raise KeyError("Doctor not found.")
+        has_schedule = conn.execute(
+            "SELECT 1 FROM doctor_slots WHERE doctor_id = ? AND date = ? LIMIT 1",
+            (doctor_id, day),
+        ).fetchone()
+        if not has_schedule:
+            _ensure_default_day(conn, doctor_id, day)
+        rows = conn.execute(
+            """SELECT s.time, s.available,
+                      EXISTS(SELECT 1 FROM appointments a
+                             WHERE a.slot_id = s.slot_id AND a.status = 'confirmed') AS booked
+               FROM doctor_slots s WHERE s.doctor_id = ? AND s.date = ? ORDER BY s.time""",
+            (doctor_id, day),
+        ).fetchall()
+    return {
+        "doctorId": doctor_id,
+        "date": day,
+        "slots": [
+            {"time": row["time"], "available": bool(row["available"]), "booked": bool(row["booked"])}
+            for row in rows
+        ],
+    }
+
+
+def update_doctor_schedule(doctor_id: str, day: str, times: list[str]) -> dict:
+    day = _validated_day(day)
+    normalized: set[str] = set()
+    for value in times:
+        try:
+            parsed = datetime.strptime(value, "%H:%M").time()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Use valid slot times in HH:MM format.") from exc
+        normalized.add(parsed.strftime("%H:%M"))
+    if len(normalized) > 24:
+        raise ValueError("A doctor can have at most 24 slots per day.")
+
+    with _lock, _connect() as conn:
+        if not conn.execute("SELECT 1 FROM doctors WHERE id = ?", (doctor_id,)).fetchone():
+            raise KeyError("Doctor not found.")
+        current = conn.execute(
+            """SELECT s.slot_id, s.time,
+                      EXISTS(SELECT 1 FROM appointments a
+                             WHERE a.slot_id = s.slot_id AND a.status = 'confirmed') AS booked
+               FROM doctor_slots s WHERE s.doctor_id = ? AND s.date = ?""",
+            (doctor_id, day),
+        ).fetchall()
+        current_by_time = {row["time"]: row for row in current}
+        for time, row in current_by_time.items():
+            if row["booked"] and time not in normalized:
+                raise ValueError(f"{time} already has a confirmed appointment and cannot be removed.")
+            conn.execute(
+                "UPDATE doctor_slots SET available = ? WHERE slot_id = ?",
+                (int(time in normalized), row["slot_id"]),
+            )
+        for time in normalized - current_by_time.keys():
+            conn.execute(
+                """INSERT INTO doctor_slots (slot_id, doctor_id, date, time, available)
+                   VALUES (?, ?, ?, ?, 1)""",
+                (f"{doctor_id}-{day}-{time}", doctor_id, day, time),
+            )
+    return doctor_schedule(doctor_id, day)
 
 
 def get_slot(slot_id: str) -> Slot | None:
@@ -142,13 +295,15 @@ def available_slots(doctor: str = "", day: str = "") -> list[Slot]:
 
 
 def doctors_with_slots() -> list[dict]:
+    doctors = [Doctor(item["id"], item["name"], item["specialty"]) for item in list_doctors()]
     slots = available_slots()
-    grouped: dict[str, list[dict]] = {doctor.id: [] for doctor in DOCTORS}
+    grouped: dict[str, list[dict]] = {doctor.id: [] for doctor in doctors}
     for slot in slots:
-        grouped[slot.doctor_id].append(slot.to_dict())
+        if slot.doctor_id in grouped:
+            grouped[slot.doctor_id].append(slot.to_dict())
     return [
         {**doctor.to_dict(), "slots": grouped[doctor.id][:6]}
-        for doctor in DOCTORS
+        for doctor in doctors
     ]
 
 
@@ -280,5 +435,5 @@ def appointment_summary(appointment: Appointment) -> str:
     reason = f" for {appointment.reason}" if appointment.reason else ""
     return (
         f"{patient} — {appointment.date} at {appointment.time} with "
-        f"{appointment.doctor_name}, phone {format_phone(appointment.phone)}{reason}"
+        f"{appointment.doctor_name}{reason}"
     )

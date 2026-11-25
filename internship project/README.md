@@ -10,6 +10,8 @@ A browser-based voice desk that lets a caller check doctor availability, book an
 - **Storage:** SQLite (`backend/data/appointments.db`) shared by the voice tools and the dashboard API.
 - **Identity rule:** A number typed before the call is only a proposal. Tools refuse to book or cancel until `confirm_caller_phone()` runs after an explicit verbal "yes".
 - **Caller details:** After the phone is confirmed, Ava asks for the caller's full name and reason for the visit. Tools refuse to book until `set_caller_details()` has recorded both.
+- **Doctor management:** Edit doctor names and specialties, and manage each doctor's open slots for the next three days from the dashboard. Changes are saved in SQLite and used by the voice agent.
+- **Phone privacy:** Ava asks callers to confirm their number without repeating or reading any phone digits aloud.
 
 ## Chosen LLM
 
@@ -92,7 +94,7 @@ Optional: if the phone is not on the same Wi-Fi or the firewall blocks it, expos
 ## Demo script (under 3 minutes)
 
 1. Click **Try Call** and enter `+1 (415) 555-0132`.
-2. The agent reads the number back. Say **"Yes, that's correct."**
+2. The agent asks whether to use the number entered on screen, without repeating it. Say **"Yes, that's correct."**
 3. When asked, say **"Jordan Lee"** and **"Annual checkup."**
 4. Say **"Check availability for tomorrow."** Pick a time from what the agent reads out.
 5. Say **"Book the 10:30 slot."** Watch the dashboard row and confirmation card update with the name and reason.

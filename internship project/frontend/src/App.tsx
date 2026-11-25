@@ -79,7 +79,7 @@ export default function App() {
 
         <div className="content-grid">
           <AppointmentsTable appointments={appointments} flash={flash} />
-          <DoctorsPanel doctors={doctors} />
+          <DoctorsPanel doctors={doctors} onUpdated={() => void refresh()} />
         </div>
 
         <footer className="workspace-foot">

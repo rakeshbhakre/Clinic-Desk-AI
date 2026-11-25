@@ -462,6 +462,179 @@ tbody tr:hover {
   font-size: 10px;
 }
 
+.doctor-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.doctor-edit-button,
+.editor-secondary,
+.editor-save {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.doctor-edit-button {
+  padding: 6px 10px;
+}
+
+.doctor-edit-button:hover,
+.editor-secondary:hover {
+  border-color: #a8d1c8;
+  background: var(--accent-soft);
+}
+
+.doctor-editor {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fbfaf7;
+}
+
+.doctor-profile-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.doctor-profile-form label,
+.schedule-date-label,
+.add-slot-row label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.doctor-profile-form input,
+.schedule-date-label input,
+.add-slot-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+  background: white;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.doctor-profile-form input:focus,
+.schedule-date-label input:focus,
+.add-slot-row input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.editor-save {
+  padding: 9px 11px;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.editor-save:disabled,
+.editor-secondary:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.schedule-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.schedule-editor-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.schedule-editor-heading strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.schedule-date-label {
+  width: min(160px, 52%);
+}
+
+.schedule-slot-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.schedule-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.schedule-slot input {
+  accent-color: var(--accent);
+}
+
+.schedule-slot.is-booked {
+  background: var(--accent-soft);
+}
+
+.schedule-slot small {
+  color: var(--accent);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.add-slot-row {
+  display: flex;
+  align-items: end;
+  gap: 7px;
+}
+
+.add-slot-row label {
+  width: 112px;
+}
+
+.editor-secondary {
+  padding: 9px 10px;
+}
+
+.editor-feedback,
+.schedule-hint {
+  color: var(--accent);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.editor-feedback.has-error {
+  color: #a3432c;
+}
+
+.schedule-hint {
+  color: var(--faint);
+}
+
 .slot-row {
   display: flex;
   flex-wrap: wrap;
@@ -1205,5 +1378,17 @@ tbody tr:hover {
   .call-launcher {
     right: 16px;
     bottom: 16px;
+  }
+
+  .doctor-profile-form {
+    grid-template-columns: 1fr;
+  }
+
+  .add-slot-row {
+    flex-wrap: wrap;
+  }
+
+  .add-slot-row label {
+    flex: 1 1 100%;
   }
 }

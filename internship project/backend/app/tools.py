@@ -7,8 +7,8 @@ from pipecat.services.llm_service import FunctionCallParams
 
 from . import db
 from .dates import resolve_date
-from .models import AppResources
-from .phone import format_phone, normalize_phone, speakable_phone
+from .models import AppResources, Appointment
+from .phone import format_phone, normalize_phone
 
 
 async def _emit(params: FunctionCallParams, message_type: str, **payload: Any) -> None:
@@ -26,6 +26,14 @@ def _resources(params: FunctionCallParams) -> AppResources:
     if resources is None:
         raise RuntimeError("Call resources are not configured.")
     return resources
+
+
+def _appointment_for_assistant(appointment: Appointment) -> dict[str, Any]:
+    """Keep caller phone data out of tool results the LLM may speak aloud."""
+    payload = appointment.to_dict()
+    payload.pop("phone", None)
+    payload.pop("formattedPhone", None)
+    return payload
 
 
 async def check_doctor_availability(
@@ -80,9 +88,8 @@ async def set_caller_phone(params: FunctionCallParams, phone: str):
     await params.result_callback(
         {
             "ok": True,
-            "phone": digits,
-            "formatted": format_phone(digits),
-            "spoken": speakable_phone(digits),
+            "received": True,
+            "confirmation_prompt": "I have the number you provided. Is that the number you'd like to use?",
         }
     )
 
@@ -102,10 +109,9 @@ async def confirm_caller_phone(params: FunctionCallParams):
         return
 
     resources.state.confirmed_phone = digits
-    formatted = format_phone(digits)
-    await _emit(params, "caller_confirmed", phone=digits, formattedPhone=formatted)
+    await _emit(params, "caller_confirmed", phone=digits, formattedPhone=format_phone(digits))
     await params.result_callback(
-        {"ok": True, "confirmed": True, "phone": digits, "formatted": formatted}
+        {"ok": True, "confirmed": True}
     )
 
 
@@ -177,7 +183,7 @@ async def book_appointment(params: FunctionCallParams, slot_id: str):
     await params.result_callback(
         {
             "ok": True,
-            "appointment": payload,
+            "appointment": _appointment_for_assistant(appointment),
             "confirmation": db.appointment_summary(appointment),
         }
     )
@@ -239,7 +245,7 @@ async def cancel_appointment(params: FunctionCallParams, appointment_id: str = "
     await params.result_callback(
         {
             "ok": True,
-            "appointment": payload,
+            "appointment": _appointment_for_assistant(cancelled),
             "confirmation": db.appointment_summary(cancelled),
         }
     )
@@ -266,7 +272,7 @@ async def check_caller_appointments(params: FunctionCallParams):
     await params.result_callback(
         {
             "ok": True,
-            "appointments": [item.to_dict() for item in active],
+            "appointments": [_appointment_for_assistant(item) for item in active],
             "count": len(active),
         }
     )

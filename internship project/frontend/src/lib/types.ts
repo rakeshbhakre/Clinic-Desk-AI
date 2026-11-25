@@ -15,6 +15,18 @@ export type Doctor = {
   slots: Slot[];
 };
 
+export type DoctorScheduleSlot = {
+  time: string;
+  available: boolean;
+  booked: boolean;
+};
+
+export type DoctorSchedule = {
+  doctorId: string;
+  date: string;
+  slots: DoctorScheduleSlot[];
+};
+
 export type Appointment = {
   id: string;
   doctorId: string;
