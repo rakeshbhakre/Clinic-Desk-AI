@@ -1,131 +1,177 @@
-# Northstar Clinic — Voice Appointment Desk
+# Nexov-AI Clinic — Voice Appointment Desk
 
-A browser-based voice desk that lets a caller check doctor availability, book an appointment, and cancel an appointment in one conversation. The web dashboard stays in sync with the call and shows doctors, open slots, appointments, a live transcript, and confirmation feedback.
+A browser-based clinic operations workspace for doctor availability, appointments, and voice-assisted booking or cancellation. The receptionist works through a live WebRTC call; the dashboard shows the real doctor schedule and appointment records.
 
-## What is included
+## What the application does
 
-- **Voice pipeline:** Pipecat 1.17.0 with ElevenLabs realtime STT, ElevenLabs TTS, OpenRouter LLM, and Silero VAD.
-- **Browser calling:** `SmallWebRTCTransport` + `@pipecat-ai/client-js`. No phone line or third-party dialler is needed.
-- **Frontend:** React 19 + Vite 8 + TypeScript, hand-written CSS, phone-style call UI.
-- **Storage:** SQLite (`backend/data/appointments.db`) shared by the voice tools and the dashboard API.
-- **Identity rule:** A number typed before the call is only a proposal. Tools refuse to book or cancel until `confirm_caller_phone()` runs after an explicit verbal "yes".
-- **Caller details:** After the phone is confirmed, Ava asks for the caller's full name and reason for the visit. Tools refuse to book until `set_caller_details()` has recorded both.
-- **Doctor management:** Edit doctor names and specialties, and manage each doctor's open slots for the next three days from the dashboard. Changes are saved in SQLite and used by the voice agent.
-- **Phone privacy:** Ava asks callers to confirm their number without repeating or reading any phone digits aloud.
+- **Overview:** Shows doctors, available slots for the selected schedule date, and confirmed appointments from the backend.
+- **Doctor availability:** Browse the next three days, filter by specialty, and edit doctor names, specialties, and open slots. Booked slots are protected.
+- **Appointments:** View appointment reference, caller, doctor, date, time, and status. Phone numbers are masked until explicitly revealed. Cancelled records remain distinguishable.
+- **Voice console:** Start a call, view connection state and duration, mute the microphone, end the call, and read the live transcript.
+- **Conversation activity:** Show only events received from the voice service, including confirmed phone numbers, availability checks, successful bookings, and cancellations. Confirmed changes refresh the dashboard and briefly highlight the affected appointment.
+- **Responsive interface:** The schedule and appointment list adapt to narrower screens; the call console becomes a full-screen mobile interface.
 
-## Chosen LLM
+The visual direction is **Quiet Intelligence**: warm off-white work surfaces, deep green accents, compact schedule rows, and an original sound-inspired SVG brand mark. The interface uses the existing **Nexov-AI Clinic** name. Manrope, Inter, and IBM Plex Mono are bundled locally. The dashboard does not add login, OTP, caller-ID identification, required caller names, or required visit reasons.
 
-`openai/gpt-4o-mini` through **OpenRouter**, using Pipecat's OpenAI-compatible `OpenAILLMService`. Change `OPENROUTER_MODEL` in `.env` to any other tool-calling model available on your OpenRouter account. Your OpenRouter key needs credits and access to that model.
+## Voice and data flow
 
-## Pipeline in one paragraph
+The browser sends microphone audio over WebRTC to the Pipecat runner using `SmallWebRTCTransport` and `@pipecat-ai/client-js`. Pipecat uses ElevenLabs realtime STT, Silero VAD for turn handling, OpenRouter through `OpenAILLMService`, and ElevenLabs TTS. Booking and availability tools use the same SQLite database as the dashboard.
 
-The browser sends microphone audio over WebRTC to the Pipecat runner. `ElevenLabsRealtimeSTTService` transcribes it, `SileroVADAnalyzer` handles turn-taking, and `OpenAILLMService` drives the conversation through OpenRouter with direct function tools: `check_doctor_availability`, `set_caller_phone`, `confirm_caller_phone`, `set_caller_details`, `check_caller_appointments`, `book_appointment`, and `cancel_appointment`. Tool results are written to SQLite, and RTVI server messages (`caller_confirmed`, `caller_details`, `appointment_created`, `appointment_cancelled`) push updates into the React UI.
+The browser starts with a **proposed** phone number. That number cannot authorize a booking or cancellation until the caller says it aloud and confirms it during the call. The agent must ask for confirmation without repeating the digits. A caller name and visit reason are not required.
 
-## Setup
+The call UI consumes Pipecat client events for connection lifecycle, partial and final transcripts, conversation activity, and local/remote audio levels. Its waveform reflects those audio-level events; it does not generate decorative audio motion. Backend RTVI messages report `caller_confirmed`, `availability_checked`, `appointment_created`, and `appointment_cancelled`. Appointment changes trigger a dashboard refetch; the dashboard also polls for updates every 12 seconds.
 
-Requirements: Python 3.12+, Node 22+, an ElevenLabs API key, and an OpenRouter API key.
+The timer starts only after the client reports the agent ready. A failed microphone permission request or connection is shown as an error state. The call can be retried or ended from the console.
+
+## Technology
+
+- **Frontend:** React 19, TypeScript, Vite 8, CSS variables, and self-hosted Fontsource fonts.
+- **Voice:** Pipecat 1.17, SmallWebRTC, ElevenLabs realtime STT and TTS, OpenRouter, and Silero VAD.
+- **Backend:** Python 3.12+, FastAPI, and SQLite.
+- **Persistence:** `backend/data/appointments.db`, shared by voice tools and dashboard APIs.
+
+## Requirements
+
+- Python 3.12 or newer
+- Node.js 22 or newer
+- An ElevenLabs API key
+- An OpenRouter API key with access to a tool-calling model
+
+## Setup on Windows
+
+From PowerShell, change into the folder that contains `backend` and `frontend`. Quote the full path when it contains spaces, and replace this example with your repository path:
 
 ```powershell
-# 1. Install backend dependencies
+cd "C:\path\to\repository"
+```
+
+Create the Python environment and install backend dependencies:
+
+```powershell
 cd backend
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 cd ..
+```
 
-# 2. Create your local env file and fill in the keys
-Copy-Item .env.example backend\.env
+Install the frontend dependencies:
 
-# 3. Install frontend dependencies
+```powershell
 cd frontend
 npm install
 cd ..
 ```
 
-`.env.example` contains:
+## Environment variables
+
+The backend reads `.env` from the repository root and `backend/.env`; `backend/.env` takes precedence. Create or edit one of those files and set the two required API keys:
 
 ```env
 ELEVENLABS_API_KEY=
+OPENROUTER_API_KEY=
+```
+
+Optional settings and their defaults:
+
+```env
 ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB
 ELEVENLABS_STT_MODEL_ID=scribe_v2_realtime
 ELEVENLABS_TTS_MODEL_ID=eleven_flash_v2_5
 
-OPENROUTER_API_KEY=
 OPENROUTER_MODEL=openai/gpt-4o-mini
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_SITE_URL=http://localhost:5173
-OPENROUTER_APP_NAME=Northstar Voice Desk
+OPENROUTER_APP_NAME=Nexov-AI Clinic
 
-DATABASE_PATH=./data/appointments.db
+DATABASE_PATH=data/appointments.db
 ```
 
-Never commit `backend/.env` or any key. The repository `.gitignore` already excludes it.
-
-ElevenLabs note: some newer/default premade voices, such as Rachel and Elli, can return `paid_plan_required` on free accounts. The configured default is Adam, a legacy premade voice that works with free-tier API keys; Antoni also works. If you change the voice and see a 402, switch back to Adam or Antoni. Realtime STT works with free-tier keys.
+Never commit `.env` files or API keys. The repository `.gitignore` excludes them.
 
 ## Run locally
 
-Terminal 1 — backend:
+Open two PowerShell terminals at the repository root.
+
+**Terminal 1 — backend:**
 
 ```powershell
+cd backend
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUTF8 = "1"
-cd backend
-.\.venv\Scripts\python bot.py -t webrtc
+.\.venv\Scripts\python.exe bot.py -t webrtc
 ```
 
-Terminal 2 — frontend:
+The FastAPI and Pipecat service listens on port `7860`.
+
+**Terminal 2 — frontend:**
 
 ```powershell
 cd frontend
-npm run certs
 npm run dev
 ```
 
-`npm run certs` creates a local self-signed certificate in `frontend/certs/` (gitignored). Vite enables HTTPS automatically when those files exist.
+Open the local URL printed by Vite, usually `http://localhost:5173` or `https://localhost:5173` when local certificates exist. If port `5173` is occupied, Vite selects another port and prints that URL.
 
-Open **https://localhost:5173**, accept the certificate warning once, click **Try Call**, enter a caller number, then click **Continue to call**. Allow microphone access when the browser asks. `npm run dev` also works without the certificate on desktop, where `http://localhost:5173` is a secure context.
+For HTTPS, generate the local certificate once from `frontend`:
 
-The Vite dev server proxies `/api`, `/start`, and `/sessions` to the Pipecat runner on port `7860`.
+```powershell
+npm run certs
+```
 
-For a phone on the same Wi-Fi, use the LAN address shown by Vite with **https**, for example `https://192.168.1.33:5173`, and allow Node through Windows Firewall. Tap **Advanced → Proceed** on the certificate warning. If your computer's LAN IP changes, run `npm run certs` again and restart Vite so the certificate includes the new address. Browsers only expose the microphone and WebRTC in a secure context, so plain `http://<LAN-IP>:5173` cannot start a call; the app now shows a clear HTTPS error instead of hanging on "Connecting".
+The certificates are stored under `frontend/certs/` and are ignored by Git. On desktop, `http://localhost` is a browser secure context and can request microphone access. For a phone or another device on the LAN, use the HTTPS network URL printed by Vite; browsers require a secure context for microphone and WebRTC access. Allow Node through Windows Firewall if prompted.
 
-Optional: if the phone is not on the same Wi-Fi or the firewall blocks it, expose the dev server with a free HTTPS tunnel such as `cloudflared tunnel --no-tls-verify --url https://localhost:5173` and open the generated `https://*.trycloudflare.com` address on the phone.
+Vite proxies `/api`, `/start`, and `/sessions` to the backend on port `7860`.
 
-## Demo script (under 3 minutes)
+## Demo flow
 
-1. Click **Try Call** and enter `+1 (415) 555-0132`.
-2. The agent asks whether to use the number entered on screen, without repeating it. Say **"Yes, that's correct."**
-3. When asked, say **"Jordan Lee"** and **"Annual checkup."**
-4. Say **"Check availability for tomorrow."** Pick a time from what the agent reads out.
-5. Say **"Book the 10:30 slot."** Watch the dashboard row and confirmation card update with the name and reason.
-6. Say **"Cancel my appointment."** Watch the row change to cancelled.
-7. Click **End** and show the call summary: duration, booked count, cancelled count.
+1. Click **Try call**, enter a caller number, and continue.
+2. Allow microphone access. The agent asks whether to use the proposed number without reading its digits aloud.
+3. Confirm the number verbally.
+4. Ask for availability, choose one of the returned slots, and ask the agent to book it.
+5. Verify that the console shows the confirmation and the dashboard updates the appointment and availability.
+6. Ask the agent to cancel the appointment. The dashboard updates after backend confirmation.
+7. End the call to see the duration and session booking/cancellation counts.
 
-If you say the number is wrong, say **"No, use 415 555 0199"** instead. The agent reads the new number back and asks again before any booking or cancellation is allowed.
+If the proposed number is wrong, say that it is incorrect and provide the replacement aloud. The agent asks for confirmation of the new number without repeating it.
 
 ## API routes
 
-The dashboard uses these routes on the same FastAPI server as WebRTC signaling:
+The dashboard and WebRTC signaling use the same FastAPI service:
 
 - `GET /api/health`
 - `GET /api/doctors`
 - `GET /api/appointments`
 - `GET /api/bootstrap`
+- `GET /api/doctors/{doctor_id}/availability?date=YYYY-MM-DD`
+- `PUT /api/doctors/{doctor_id}`
+- `PUT /api/doctors/{doctor_id}/availability?date=YYYY-MM-DD`
+- `POST /start`
 
-`POST /start` receives the browser's session request. The proposed phone is sent as `body.proposed_phone`.
+`POST /start` receives the browser's WebRTC session request. A phone entered before the call is sent as `body.proposed_phone`; it is not treated as confirmed identity.
 
-## Tests
+## Tests and build
+
+Run the backend tests:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The tests cover phone normalization, typed-number-without-confirmation rejection, caller name and reason capture, booking after confirmation, slot removal, and double-cancel protection.
+The tests cover phone normalization, rejecting unconfirmed numbers, booking with only a confirmed phone number, schedule updates, and cancellation behavior.
 
-## Windows note
+Build and type-check the frontend:
 
-If the Visual C++ redistributable is missing, the native `loudness` and `onnxruntime` wheels may fail to import with a DLL error. `backend/app/_compat.py` installs small NumPy fallbacks so the demo still starts; installing the Microsoft Visual C++ Redistributable restores the native audio metrics and full Silero model accuracy.
+```powershell
+cd frontend
+npm run build
+```
+
+There is no frontend lint script configured in `package.json`.
+
+## Windows audio note
+
+If the Visual C++ Redistributable is missing, native `loudness` or `onnxruntime` wheels may fail to import with a DLL error. `backend/app/_compat.py` provides NumPy fallbacks so the service can start; installing the Microsoft Visual C++ Redistributable restores native audio metrics and full Silero model accuracy.
 
 ## Submission
 

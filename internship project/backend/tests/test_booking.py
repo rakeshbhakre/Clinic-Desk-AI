@@ -77,19 +77,15 @@ def test_confirmed_number_can_book_and_slot_disappears(isolated_db):
     assert len(params.worker.frames) == 3
 
 
-def test_booking_requires_name_and_reason(isolated_db):
+def test_booking_does_not_require_name_or_reason(isolated_db):
     params = FakeParams(CallState(proposed_phone="14155550132"))
     slot_id = db.available_slots()[0].slot_id
 
     asyncio.run(confirm_caller_phone(params))
     asyncio.run(book_appointment(params, slot_id))
-    assert params.results[-1]["ok"] is False
-    assert db.list_appointments() == []
-
-    asyncio.run(set_caller_details(params, "Jordan Lee", "Annual checkup"))
-    asyncio.run(book_appointment(params, slot_id))
     assert params.results[-1]["ok"] is True
-    assert db.list_appointments()[0]["patientName"] == "Jordan Lee"
+    assert db.list_appointments()[0]["patientName"] == ""
+    assert db.list_appointments()[0]["reason"] == ""
 
 
 def test_corrected_number_requires_a_new_confirmation(isolated_db):

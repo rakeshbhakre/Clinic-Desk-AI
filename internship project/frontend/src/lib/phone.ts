@@ -17,6 +17,12 @@ export function formatPhone(input: string): string {
   return `+${digits}`;
 }
 
+export function maskPhone(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  if (!digits) return "Number unavailable";
+  return `••• ••• ${digits.slice(-4)}`;
+}
+
 export function formatDuration(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;

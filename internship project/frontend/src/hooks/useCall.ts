@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RTVIEvent } from "@pipecat-ai/client-js";
 
-import { createClient } from "../lib/client";
 import { formatPhone, normalizePhone } from "../lib/phone";
-import { playTone, startRing, stopRing } from "../lib/sounds";
 import type {
+  AgentActivityItem,
+  AgentActivityState,
   Appointment,
   AudioLevels,
   CallStatus,
@@ -12,13 +12,11 @@ import type {
   TranscriptLine,
 } from "../lib/types";
 
-type Options = {
-  onEvent?: (event: ServerEvent) => void;
-};
+type Options = { onEvent?: (event: ServerEvent) => void };
+type PipecatClientInstance = ReturnType<typeof import("../lib/client").createClient>;
 
 function errorMessage(value: unknown): string {
-  let message = "Could not start the call. Check the backend and try again.";
-
+  let message = "The call could not connect. Check the connection and try again.";
   if (value && typeof value === "object") {
     const data = "data" in value ? (value as { data?: unknown }).data : value;
     if (data && typeof data === "object" && "error" in data) {
@@ -29,20 +27,50 @@ function errorMessage(value: unknown): string {
   } else if (typeof value === "string" && value) {
     message = value;
   }
-
-  if (/not supported or suppressed|secure context|mediagroup|mediaDevices/i.test(message)) {
-    return "Microphone access needs HTTPS. On your phone, open the https:// address and accept the certificate warning, then try again.";
+  if (/not supported or suppressed|secure context|mediagroup|mediaDevices|permission denied|notallowederror/i.test(message)) {
+    return "Microphone access was blocked. Allow it in your browser settings, then try again.";
   }
   return message;
 }
 
+function activityFromEvent(event: ServerEvent): Omit<AgentActivityItem, "id" | "at"> | null {
+  if (event.type === "caller_confirmed") {
+    return { label: "Phone confirmed", detail: "Verbal confirmation received", kind: "success" };
+  }
+  if (event.type === "availability_checked") {
+    const count = event.totalAvailable ?? 0;
+    const date = event.date ? new Date(`${event.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : null;
+    return {
+      label: "Availability checked",
+      detail: `${count} ${count === 1 ? "open slot" : "open slots"}${date ? ` · ${date}` : ""}`,
+      kind: "neutral",
+    };
+  }
+  if (event.type === "appointment_created" && event.appointment) {
+    return {
+      label: "Appointment confirmed",
+      detail: `${event.appointment.doctorName} · ${event.appointment.date} · ${event.appointment.time}`,
+      kind: "success",
+    };
+  }
+  if (event.type === "appointment_cancelled" && event.appointment) {
+    return {
+      label: "Appointment cancelled",
+      detail: `${event.appointment.doctorName} · ${event.appointment.date} · ${event.appointment.time}`,
+      kind: "warning",
+    };
+  }
+  return null;
+}
+
 export function useCall({ onEvent }: Options = {}) {
   const [status, setStatus] = useState<CallStatus>("idle");
+  const [activityState, setActivityState] = useState<AgentActivityState>("listening");
   const [proposedPhone, setProposedPhone] = useState<string | null>(null);
   const [verifiedPhone, setVerifiedPhone] = useState<string | null>(null);
   const [callerName, setCallerName] = useState<string | null>(null);
-  const [callerReason, setCallerReason] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [activity, setActivity] = useState<AgentActivityItem[]>([]);
   const [seconds, setSeconds] = useState(0);
   const [levels, setLevels] = useState<AudioLevels>({ local: 0, remote: 0 });
   const [muted, setMuted] = useState(false);
@@ -51,18 +79,28 @@ export function useCall({ onEvent }: Options = {}) {
   const [cancelledCount, setCancelledCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  const clientRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const clientRef = useRef<PipecatClientInstance | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const timerRef = useRef<number | null>(null);
   const pendingRef = useRef<number | null>(null);
   const connectTimeoutRef = useRef<number | null>(null);
+  const endingTimeoutRef = useRef<number | null>(null);
   const startIdRef = useRef(0);
+  const statusRef = useRef<CallStatus>("idle");
   const onEventRef = useRef(onEvent);
-  const botOutputSeenRef = useRef<Set<string>>(new Set());
+  const currentUserLineRef = useRef<string | null>(null);
+  const currentBotLineRef = useRef<string | null>(null);
+  const seenActivityRef = useRef<Set<string>>(new Set());
+  const seenServerEventsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     onEventRef.current = onEvent;
   }, [onEvent]);
+
+  const updateStatus = useCallback((next: CallStatus) => {
+    statusRef.current = next;
+    setStatus(next);
+  }, []);
 
   useEffect(() => {
     const audio = document.createElement("audio");
@@ -71,7 +109,6 @@ export function useCall({ onEvent }: Options = {}) {
     audio.style.display = "none";
     document.body.appendChild(audio);
     audioRef.current = audio;
-
     return () => {
       audio.srcObject = null;
       audio.remove();
@@ -79,14 +116,24 @@ export function useCall({ onEvent }: Options = {}) {
     };
   }, []);
 
-  const appendLine = useCallback((role: "user" | "agent", text: string) => {
-    const clean = text.trim();
-    if (!clean) return;
-    setTranscript((previous) => [
-      ...previous,
-      { id: `${Date.now()}-${Math.random()}`, role, text: clean, at: Date.now() },
-    ]);
-  }, []);
+  const upsertTranscriptLine = useCallback(
+    (role: TranscriptLine["role"], text: string, final: boolean, suppliedId?: string) => {
+      const clean = text.trim();
+      if (!clean) return;
+      const currentRef = role === "user" ? currentUserLineRef : currentBotLineRef;
+      const id = suppliedId ?? currentRef.current ?? `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      if (!final) currentRef.current = id;
+      else if (currentRef.current === id) currentRef.current = null;
+      setTranscript((previous) => {
+        const index = previous.findIndex((line) => line.id === id);
+        if (index < 0) return [...previous, { id, role, text: clean, at: Date.now(), final }];
+        const next = [...previous];
+        next[index] = { ...next[index], text: clean, final };
+        return next;
+      });
+    },
+    [],
+  );
 
   const stopTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -104,148 +151,170 @@ export function useCall({ onEvent }: Options = {}) {
 
   const startTimer = useCallback(() => {
     stopTimer();
-    timerRef.current = window.setInterval(() => {
-      setSeconds((value) => value + 1);
-    }, 1000);
+    timerRef.current = window.setInterval(() => setSeconds((value) => value + 1), 1000);
   }, [stopTimer]);
+
+  const addActivity = useCallback((event: ServerEvent) => {
+    const item = activityFromEvent(event);
+    if (!item) return;
+    const uniquePart = event.appointment?.id ?? `${event.date ?? ""}:${event.totalAvailable ?? ""}:${Math.floor(Date.now() / 1000)}`;
+    const key = `${event.type}:${uniquePart}`;
+    if (seenActivityRef.current.has(key)) return;
+    seenActivityRef.current.add(key);
+    setActivity((previous) => [...previous, { ...item, id: key, at: Date.now() }].slice(-20));
+  }, []);
 
   const handleServerMessage = useCallback((message: unknown) => {
     const wrapper = message as { data?: unknown };
-    const payload = (wrapper?.data && typeof wrapper.data === "object"
-      ? wrapper.data
-      : wrapper) as ServerEvent;
-
+    const payload = (wrapper?.data && typeof wrapper.data === "object" ? wrapper.data : wrapper) as ServerEvent;
     if (!payload?.type) return;
-
+    if ((payload.type === "appointment_created" || payload.type === "appointment_cancelled") && payload.appointment) {
+      const eventKey = `${payload.type}:${payload.appointment.id}`;
+      if (seenServerEventsRef.current.has(eventKey)) return;
+      seenServerEventsRef.current.add(eventKey);
+    }
     if (payload.type === "caller_confirmed") {
       setVerifiedPhone(payload.formattedPhone ?? payload.phone ?? null);
     }
-    if (payload.type === "caller_details") {
-      setCallerName(payload.name ?? null);
-      setCallerReason(payload.reason ?? null);
-    }
+    if (payload.type === "caller_details") setCallerName(payload.name ?? null);
     if (payload.type === "appointment_created" && payload.appointment) {
       setConfirmation(payload.appointment);
       setBookedCount((value) => value + 1);
     }
-    if (payload.type === "appointment_cancelled") {
-      setCancelledCount((value) => value + 1);
-    }
+    if (payload.type === "appointment_cancelled") setCancelledCount((value) => value + 1);
+    addActivity(payload);
     onEventRef.current?.(payload);
-  }, []);
+  }, [addActivity]);
 
   const start = useCallback(
-    async (rawPhone: string) => {
+    (rawPhone: string) => {
+      if (["requesting_permission", "connecting", "connected", "ending"].includes(statusRef.current)) return;
       const digits = normalizePhone(rawPhone);
       const startId = ++startIdRef.current;
 
       if (pendingRef.current !== null) window.clearTimeout(pendingRef.current);
       clearConnectTimeout();
+      if (endingTimeoutRef.current !== null) window.clearTimeout(endingTimeoutRef.current);
       if (clientRef.current) void clientRef.current.disconnect();
       if (audioRef.current) audioRef.current.srcObject = null;
       stopTimer();
 
+      currentUserLineRef.current = null;
+      currentBotLineRef.current = null;
+      seenActivityRef.current.clear();
+      seenServerEventsRef.current.clear();
       setProposedPhone(formatPhone(digits));
       setVerifiedPhone(null);
       setCallerName(null);
-      setCallerReason(null);
-      botOutputSeenRef.current.clear();
       setTranscript([]);
+      setActivity([]);
       setConfirmation(null);
       setSeconds(0);
       setLevels({ local: 0, remote: 0 });
       setMuted(false);
       setError(null);
-      setStatus("ringing");
-      startRing();
+      setActivityState("listening");
+      updateStatus("requesting_permission");
 
       pendingRef.current = window.setTimeout(async () => {
         pendingRef.current = null;
         if (startId !== startIdRef.current) return;
-        setStatus("connecting");
 
         connectTimeoutRef.current = window.setTimeout(() => {
           connectTimeoutRef.current = null;
           if (startId !== startIdRef.current) return;
-          setError(
-            window.location.hostname === "localhost"
-              ? "Connection timed out. Check that the backend is running and try again."
-              : "Connection timed out. On a phone, open the https:// address and accept the certificate warning.",
-          );
-          setStatus("error");
+          setError("Connection timed out. Check that the backend and network are available, then try again.");
+          updateStatus("error");
           stopTimer();
           void clientRef.current?.disconnect();
-        }, 20000);
+        }, 25000);
 
         try {
+          const { createClient } = await import("../lib/client");
+          if (startId !== startIdRef.current) return;
           const client = createClient({
             onBotReady: () => {
-              if (startId !== startIdRef.current) return;
+              if (startId !== startIdRef.current || !["requesting_permission", "connecting"].includes(statusRef.current)) return;
               clearConnectTimeout();
-              stopRing();
-              setStatus("connected");
+              updateStatus("connected");
+              setActivityState("listening");
               startTimer();
-              playTone("connect");
             },
             onDisconnected: () => {
               if (startId !== startIdRef.current) return;
               clearConnectTimeout();
-              stopRing();
+              if (endingTimeoutRef.current !== null) window.clearTimeout(endingTimeoutRef.current);
+              endingTimeoutRef.current = null;
               stopTimer();
               if (audioRef.current) audioRef.current.srcObject = null;
-              setStatus("ended");
-              playTone("end");
+              setLevels({ local: 0, remote: 0 });
+              if (statusRef.current !== "error") updateStatus("ended");
             },
             onError: (message) => {
               if (startId !== startIdRef.current) return;
               clearConnectTimeout();
-              stopRing();
               setError(errorMessage(message));
-              setStatus("error");
               stopTimer();
+              updateStatus("error");
             },
           });
-
           clientRef.current = client;
 
+          client.on(RTVIEvent.BotStarted, () => {
+            if (startId === startIdRef.current && statusRef.current === "requesting_permission") {
+              updateStatus("connecting");
+            }
+          });
           client.on(RTVIEvent.UserInput, (data) => {
-            if (startId !== startIdRef.current) return;
-            if (data.final) appendLine("user", data.text);
+            if (startId !== startIdRef.current || !data.text.trim()) return;
+            upsertTranscriptLine("user", data.text, data.final);
           });
           client.on(RTVIEvent.BotOutput, (data) => {
-            if (startId !== startIdRef.current) return;
-            if (data.output_type === "token" || data.output_type === "word") return;
-            // RTVI can send the same sentence once as "new" and again as
-            // "completed" after synthesis. Show it only once.
-            if (data.spoken_status && data.spoken_status !== "completed") return;
-            const cleanText = data.text.trim();
-            const key =
-              data.segment_id !== undefined
-                ? `segment:${data.segment_id}:${cleanText}`
-                : `text:${cleanText}`;
-            if (botOutputSeenRef.current.has(key)) return;
-            botOutputSeenRef.current.add(key);
-            appendLine("agent", cleanText);
+            if (startId !== startIdRef.current || data.output_type === "token" || data.output_type === "word") return;
+            const final = data.spoken_status === "completed" || !data.spoken_status;
+            const text = data.spoken_progress?.accumulated_text || data.text;
+            const segmentId = data.segment_id === undefined ? undefined : `bot-${data.segment_id}`;
+            upsertTranscriptLine("agent", text, final, segmentId);
+          });
+          client.on(RTVIEvent.BotLlmStarted, () => {
+            if (startId === startIdRef.current) setActivityState("thinking");
+          });
+          client.on(RTVIEvent.LLMFunctionCallStarted, () => {
+            if (startId === startIdRef.current) setActivityState("executing_tool");
+          });
+          client.on(RTVIEvent.LLMFunctionCallInProgress, () => {
+            if (startId === startIdRef.current) setActivityState("executing_tool");
+          });
+          client.on(RTVIEvent.LLMFunctionCallStopped, () => {
+            if (startId === startIdRef.current) setActivityState("thinking");
+          });
+          client.on(RTVIEvent.BotStartedSpeaking, () => {
+            if (startId === startIdRef.current) setActivityState("speaking");
+          });
+          client.on(RTVIEvent.BotStoppedSpeaking, () => {
+            if (startId === startIdRef.current) setActivityState("listening");
+          });
+          client.on(RTVIEvent.UserStartedSpeaking, () => {
+            if (startId === startIdRef.current) setActivityState("listening");
+          });
+          client.on(RTVIEvent.UserStoppedSpeaking, () => {
+            if (startId === startIdRef.current) setActivityState("thinking");
           });
           client.on(RTVIEvent.TrackStarted, (track, participant) => {
-            if (startId !== startIdRef.current) return;
-            if (participant?.local || track.kind !== "audio") return;
+            if (startId !== startIdRef.current || participant?.local || track.kind !== "audio") return;
             const audio = audioRef.current;
             if (!audio) return;
             audio.srcObject = new MediaStream([track]);
             void audio.play().catch(() => undefined);
           });
           client.on(RTVIEvent.ServerMessage, (message) => {
-            if (startId !== startIdRef.current) return;
-            handleServerMessage(message);
+            if (startId === startIdRef.current) handleServerMessage(message);
           });
           client.on(RTVIEvent.LocalAudioLevel, (level) => {
-            if (startId !== startIdRef.current) return;
-            setLevels((value) => ({ ...value, local: level }));
+            if (startId === startIdRef.current) setLevels((current) => ({ ...current, local: level }));
           });
           client.on(RTVIEvent.RemoteAudioLevel, (level) => {
-            if (startId !== startIdRef.current) return;
-            setLevels((value) => ({ ...value, remote: level }));
+            if (startId === startIdRef.current) setLevels((current) => ({ ...current, remote: level }));
           });
 
           await client.startBotAndConnect({
@@ -259,79 +328,94 @@ export function useCall({ onEvent }: Options = {}) {
         } catch (cause) {
           if (startId !== startIdRef.current) return;
           clearConnectTimeout();
-          stopRing();
           setError(errorMessage(cause));
-          setStatus("error");
           stopTimer();
+          updateStatus("error");
         }
-      }, 850);
+      }, 120);
     },
-    [appendLine, clearConnectTimeout, handleServerMessage, startTimer, stopTimer],
+    [clearConnectTimeout, handleServerMessage, startTimer, stopTimer, updateStatus, upsertTranscriptLine],
   );
 
   const end = useCallback(() => {
-    startIdRef.current += 1;
+    if (["idle", "ended", "ending"].includes(statusRef.current)) return;
     if (pendingRef.current !== null) {
       window.clearTimeout(pendingRef.current);
       pendingRef.current = null;
     }
+    clearConnectTimeout();
+    stopTimer();
+    updateStatus("ending");
+    const client = clientRef.current;
+    clientRef.current = null;
+    if (client) void client.disconnect();
+    if (audioRef.current) audioRef.current.srcObject = null;
+    endingTimeoutRef.current = window.setTimeout(() => {
+      if (statusRef.current === "ending") updateStatus("ended");
+    }, 1200);
+  }, [clearConnectTimeout, stopTimer, updateStatus]);
+
+  const open = useCallback(() => {
+    setError(null);
+    updateStatus("precall");
+  }, [updateStatus]);
+
+  const reset = useCallback(() => {
+    startIdRef.current += 1;
+    if (pendingRef.current !== null) window.clearTimeout(pendingRef.current);
+    if (endingTimeoutRef.current !== null) window.clearTimeout(endingTimeoutRef.current);
     clearConnectTimeout();
     const client = clientRef.current;
     clientRef.current = null;
     if (client) void client.disconnect();
     if (audioRef.current) audioRef.current.srcObject = null;
     stopTimer();
-    stopRing();
-    setStatus("ended");
-    playTone("end");
-  }, [clearConnectTimeout, stopTimer]);
-
-  const open = useCallback(() => {
-    setStatus("precall");
-    setError(null);
-  }, []);
-
-  const reset = useCallback(() => {
-    end();
-    setStatus("idle");
+    updateStatus("idle");
+    setActivityState("listening");
     setError(null);
     setProposedPhone(null);
     setVerifiedPhone(null);
     setCallerName(null);
-    setCallerReason(null);
     setTranscript([]);
+    setActivity([]);
     setConfirmation(null);
     setSeconds(0);
+    setLevels({ local: 0, remote: 0 });
+    setMuted(false);
     setBookedCount(0);
     setCancelledCount(0);
-  }, [end]);
+    currentUserLineRef.current = null;
+    currentBotLineRef.current = null;
+    seenActivityRef.current.clear();
+    seenServerEventsRef.current.clear();
+  }, [clearConnectTimeout, stopTimer, updateStatus]);
 
   const toggleMute = useCallback(() => {
     const client = clientRef.current;
-    if (!client) return;
-    const next = !muted;
-    client.enableMic(!next);
-    setMuted(next);
+    if (!client || statusRef.current !== "connected") return;
+    const nextMuted = !muted;
+    client.enableMic(!nextMuted);
+    setMuted(nextMuted);
   }, [muted]);
 
   useEffect(() => {
     return () => {
       if (pendingRef.current !== null) window.clearTimeout(pendingRef.current);
       if (connectTimeoutRef.current !== null) window.clearTimeout(connectTimeoutRef.current);
+      if (endingTimeoutRef.current !== null) window.clearTimeout(endingTimeoutRef.current);
       if (timerRef.current !== null) window.clearInterval(timerRef.current);
-      stopRing();
-      const client = clientRef.current;
-      if (client) void client.disconnect();
+      if (clientRef.current) void clientRef.current.disconnect();
     };
   }, []);
 
   return {
     status,
+    activityState,
     proposedPhone,
     verifiedPhone,
     callerName,
-    callerReason,
     transcript,
+    activity,
     seconds,
     levels,
     muted,

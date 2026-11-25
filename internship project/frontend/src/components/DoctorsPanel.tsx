@@ -1,12 +1,17 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { api } from "../lib/api";
 import { formatDate } from "../lib/phone";
 import type { Doctor, DoctorScheduleSlot } from "../lib/types";
+import { Icon } from "./Icon";
 
 type Props = {
   doctors: Doctor[];
-  onUpdated?: () => void;
+  loading: boolean;
+  bootstrapError: string | null;
+  refreshKey: number;
+  onUpdated: () => void;
+  onOpenSlotCount: (count: number) => void;
 };
 
 function localDate(value = new Date()) {
@@ -22,31 +27,57 @@ function shiftDate(value: string, days: number) {
   return localDate(date);
 }
 
-export function DoctorsPanel({ doctors, onUpdated }: Props) {
-  const [copied, setCopied] = useState<string | null>(null);
+function initials(name: string) {
+  return name
+    .replace(/^Dr\.\s*/i, "")
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+export function DoctorsPanel({ doctors, loading, bootstrapError, refreshKey, onUpdated, onOpenSlotCount }: Props) {
+  const [scheduleDate, setScheduleDate] = useState(() => localDate());
+  const [scheduleByDoctor, setScheduleByDoctor] = useState<Record<string, DoctorScheduleSlot[]>>({});
+  const [loadingSchedule, setLoadingSchedule] = useState(true);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [specialtyFilter, setSpecialtyFilter] = useState("all");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [specialty, setSpecialty] = useState("");
-  const [scheduleDate, setScheduleDate] = useState(() => localDate());
-  const [scheduleSlots, setScheduleSlots] = useState<DoctorScheduleSlot[]>([]);
   const [newTime, setNewTime] = useState("17:00");
-  const [loadingSchedule, setLoadingSchedule] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const doctorIds = useMemo(() => doctors.map((doctor) => doctor.id).join(","), [doctors]);
+  const specialtyOptions = useMemo(
+    () => [...new Set(doctors.map((doctor) => doctor.specialty))].sort((a, b) => a.localeCompare(b)),
+    [doctors],
+  );
+  const filteredDoctors = doctors.filter(
+    (doctor) => specialtyFilter === "all" || doctor.specialty === specialtyFilter,
+  );
+  const today = localDate();
+  const lastDay = shiftDate(today, 2);
+
   useEffect(() => {
-    if (!editingId) return;
+    const ids = doctorIds ? doctorIds.split(",") : [];
+    if (ids.length === 0) {
+      setScheduleByDoctor({});
+      setLoadingSchedule(false);
+      return;
+    }
     let current = true;
     setLoadingSchedule(true);
-    setError(null);
-    api
-      .doctorSchedule(editingId, scheduleDate)
-      .then((schedule) => {
-        if (current) setScheduleSlots(schedule.slots);
+    setScheduleError(null);
+    Promise.all(ids.map((id) => api.doctorSchedule(id, scheduleDate)))
+      .then((schedules) => {
+        if (!current) return;
+        setScheduleByDoctor(Object.fromEntries(schedules.map((schedule) => [schedule.doctorId, schedule.slots])));
       })
       .catch((cause) => {
-        if (current) setError(cause instanceof Error ? cause.message : "Could not load availability.");
+        if (current) setScheduleError(cause instanceof Error ? cause.message : "Could not load doctor schedules.");
       })
       .finally(() => {
         if (current) setLoadingSchedule(false);
@@ -54,29 +85,33 @@ export function DoctorsPanel({ doctors, onUpdated }: Props) {
     return () => {
       current = false;
     };
-  }, [editingId, scheduleDate]);
+  }, [doctorIds, scheduleDate, refreshKey]);
 
-  async function copySlot(slotId: string) {
-    try {
-      await navigator.clipboard.writeText(slotId);
-      setCopied(slotId);
-      window.setTimeout(() => setCopied(null), 1600);
-    } catch {
-      setCopied(null);
-    }
-  }
+  useEffect(() => {
+    const total = Object.values(scheduleByDoctor)
+      .flat()
+      .filter((slot) => slot.available && !slot.booked).length;
+    onOpenSlotCount(total);
+  }, [scheduleByDoctor, onOpenSlotCount]);
+
+  const changeDoctorSlots = useCallback((doctorId: string, update: (slots: DoctorScheduleSlot[]) => DoctorScheduleSlot[]) => {
+    setScheduleByDoctor((current) => ({
+      ...current,
+      [doctorId]: update(current[doctorId] ?? []),
+    }));
+  }, []);
 
   function beginEdit(doctor: Doctor) {
     if (editingId === doctor.id) {
       setEditingId(null);
-      setError(null);
+      setScheduleError(null);
+      setNotice(null);
       return;
     }
     setEditingId(doctor.id);
     setName(doctor.name);
     setSpecialty(doctor.specialty);
-    setScheduleDate(localDate());
-    setError(null);
+    setScheduleError(null);
     setNotice(null);
   }
 
@@ -84,166 +119,162 @@ export function DoctorsPanel({ doctors, onUpdated }: Props) {
     event.preventDefault();
     if (!editingId) return;
     setSaving(true);
-    setError(null);
+    setScheduleError(null);
     setNotice(null);
     try {
-      const result = await api.updateDoctor(editingId, name, specialty);
-      setName(result.doctor.name);
-      setSpecialty(result.doctor.specialty);
+      await api.updateDoctor(editingId, name, specialty);
       setNotice("Doctor details saved.");
-      onUpdated?.();
+      onUpdated();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save doctor details.");
+      setScheduleError(cause instanceof Error ? cause.message : "Could not save doctor details.");
     } finally {
       setSaving(false);
     }
   }
 
-  async function saveSchedule() {
-    if (!editingId) return;
+  async function saveSchedule(doctorId: string) {
     setSaving(true);
-    setError(null);
+    setScheduleError(null);
     setNotice(null);
     try {
-      const result = await api.updateDoctorSchedule(
-        editingId,
+      const slots = scheduleByDoctor[doctorId] ?? [];
+      const schedule = await api.updateDoctorSchedule(
+        doctorId,
         scheduleDate,
-        scheduleSlots.filter((slot) => slot.available || slot.booked).map((slot) => slot.time),
+        slots.filter((slot) => slot.available || slot.booked).map((slot) => slot.time),
       );
-      setScheduleSlots(result.slots);
+      setScheduleByDoctor((current) => ({ ...current, [doctorId]: schedule.slots }));
       setNotice("Availability saved.");
-      onUpdated?.();
+      onUpdated();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save availability.");
+      setScheduleError(cause instanceof Error ? cause.message : "Could not save availability.");
     } finally {
       setSaving(false);
     }
   }
 
-  function addTime() {
-    if (scheduleSlots.some((slot) => slot.time === newTime)) return;
-    setScheduleSlots((previous) =>
-      [...previous, { time: newTime, available: true, booked: false }].sort((a, b) =>
-        a.time.localeCompare(b.time),
-      ),
+  function addTime(doctorId: string) {
+    if ((scheduleByDoctor[doctorId] ?? []).some((slot) => slot.time === newTime)) return;
+    changeDoctorSlots(doctorId, (slots) =>
+      [...slots, { time: newTime, available: true, booked: false }].sort((a, b) => a.time.localeCompare(b.time)),
     );
   }
 
   return (
-    <section className="panel doctors-panel" id="doctors">
-      <header className="panel-head">
+    <section className="operations-section doctors-section" id="doctors" aria-labelledby="doctors-title">
+      <header className="section-heading schedule-heading">
         <div>
-          <p className="eyebrow">Today&apos;s board</p>
-          <h2>Doctors &amp; slots</h2>
+          <p className="section-kicker">Clinical schedule</p>
+          <h2 id="doctors-title">Doctors</h2>
         </div>
-        <span className="count-badge">{doctors.length}</span>
+        <div className="schedule-tools">
+          <div className="date-stepper" aria-label="Schedule date">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setScheduleDate(shiftDate(scheduleDate, -1))}
+              disabled={scheduleDate <= today}
+              aria-label="Previous day"
+            ><Icon name="chevron-left" size={16} /></button>
+            <label>
+              <span className="sr-only">Schedule date</span>
+              <input
+                type="date"
+                value={scheduleDate}
+                min={today}
+                max={lastDay}
+                onChange={(event) => setScheduleDate(event.target.value)}
+              />
+            </label>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setScheduleDate(shiftDate(scheduleDate, 1))}
+              disabled={scheduleDate >= lastDay}
+              aria-label="Next day"
+            ><Icon name="chevron-right" size={16} /></button>
+          </div>
+          <label className="specialty-filter">
+            <Icon name="filter" size={15} />
+            <span className="sr-only">Filter by specialty</span>
+            <select value={specialtyFilter} onChange={(event) => setSpecialtyFilter(event.target.value)}>
+              <option value="all">All specialties</option>
+              {specialtyOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+        </div>
       </header>
 
-      <div className="doctor-list">
-        {doctors.map((doctor, index) => {
-          const initials = doctor.name
-            .replace(/^Dr\.\s*/i, "")
-            .split(" ")
-            .map((part) => part[0])
-            .join("");
-          const isEditing = editingId === doctor.id;
-          return (
-            <article className="doctor-card" key={doctor.id}>
-              <div className={`doctor-avatar tone-${index % 4}`}>{initials}</div>
-              <div className="doctor-body">
-                <div className="doctor-card-head">
-                  <div className="doctor-title">
-                    <h3>{doctor.name}</h3>
-                    <span>{doctor.specialty}</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="doctor-edit-button"
-                    onClick={() => beginEdit(doctor)}
-                    aria-expanded={isEditing}
-                  >
-                    {isEditing ? "Close" : "Edit"}
-                  </button>
+      <div className="doctor-schedule-head" aria-hidden="true">
+        <span>Doctor</span><span>Schedule · {scheduleDate === today ? "Today" : formatDate(scheduleDate)}</span><span>Manage</span>
+      </div>
+
+      {loading && doctors.length === 0 ? (
+        <div className="schedule-loading" role="status"><span /> Loading doctors</div>
+      ) : bootstrapError && doctors.length === 0 ? (
+        <div className="section-error" role="alert">Doctor data is unavailable.</div>
+      ) : loadingSchedule && Object.keys(scheduleByDoctor).length === 0 ? (
+        <div className="schedule-loading" role="status"><span /> Loading schedule</div>
+      ) : scheduleError ? (
+        <div className="section-error" role="alert">{scheduleError}</div>
+      ) : filteredDoctors.length === 0 ? (
+        <div className="empty-state compact-empty"><strong>{doctors.length === 0 ? "No doctors are available." : "No doctors match this specialty."}</strong></div>
+      ) : (
+        <>
+        {loadingSchedule && <p className="schedule-refresh" role="status">Updating availability</p>}
+        <div className="doctor-schedule-list">
+          {filteredDoctors.map((doctor, index) => {
+            const slots = scheduleByDoctor[doctor.id] ?? [];
+            const openCount = slots.filter((slot) => slot.available && !slot.booked).length;
+            const isEditing = editingId === doctor.id;
+            return (
+              <article className="doctor-schedule-row" key={doctor.id}>
+                <div className="doctor-identity">
+                  <span className={`doctor-avatar tone-${index % 4}`} aria-hidden="true">{initials(doctor.name)}</span>
+                  <span className="doctor-identity-copy"><strong>{doctor.name}</strong><small>{doctor.specialty}</small></span>
                 </div>
-                <div className="slot-row">
-                  {doctor.slots.length === 0 ? (
-                    <span className="slot-empty">No open slots</span>
+                <div className="doctor-time-area">
+                  {slots.length === 0 ? (
+                    <span className="schedule-empty">No slots scheduled</span>
                   ) : (
-                    doctor.slots.slice(0, 3).map((slot) => (
-                      <button
-                        type="button"
-                        className="slot-chip"
-                        key={slot.id}
-                        onClick={() => void copySlot(slot.id)}
-                        title="Copy slot id for the voice agent"
-                      >
-                        <strong>{formatDate(slot.date)}</strong>
-                        <span>{slot.time}</span>
-                        {copied === slot.id && <em>Copied</em>}
-                      </button>
-                    ))
+                    <div className="schedule-time-list">
+                      {slots.map((slot) => {
+                        const status = slot.booked ? "booked" : slot.available ? "open" : "closed";
+                        const label = slot.booked ? "Booked" : slot.available ? "Open" : "Closed";
+                        return (
+                          <span className={`schedule-time schedule-time-${status}`} key={slot.time}>
+                            <strong>{slot.time}</strong><small>{label}</small>
+                          </span>
+                        );
+                      })}
+                    </div>
                   )}
+                </div>
+                <div className="doctor-row-action">
+                  <span className="doctor-open-count">{openCount} open</span>
+                  <button className="text-button" type="button" onClick={() => beginEdit(doctor)} aria-expanded={isEditing}>
+                    {isEditing ? "Done" : "Edit"}
+                  </button>
                 </div>
 
                 {isEditing && (
                   <div className="doctor-editor">
                     <form className="doctor-profile-form" onSubmit={saveDoctor}>
-                      <label>
-                        Doctor name
-                        <input value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required />
-                      </label>
-                      <label>
-                        Specialty
-                        <input
-                          value={specialty}
-                          onChange={(event) => setSpecialty(event.target.value)}
-                          maxLength={100}
-                          required
-                        />
-                      </label>
-                      <button className="editor-save" type="submit" disabled={saving}>
-                        Save details
-                      </button>
+                      <label>Doctor name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required /></label>
+                      <label>Specialty<input value={specialty} onChange={(event) => setSpecialty(event.target.value)} maxLength={100} required /></label>
+                      <button className="small-primary" type="submit" disabled={saving}>Save details</button>
                     </form>
-
-                    <div className="schedule-editor">
-                      <div className="schedule-editor-heading">
-                        <div>
-                          <p className="eyebrow">Availability</p>
-                          <strong>Open slots</strong>
-                        </div>
-                        <label className="schedule-date-label">
-                          Date
-                          <input
-                            type="date"
-                            value={scheduleDate}
-                            min={localDate()}
-                            max={shiftDate(localDate(), 2)}
-                            onChange={(event) => setScheduleDate(event.target.value)}
-                          />
-                        </label>
-                      </div>
-                      {loadingSchedule ? (
-                        <p className="schedule-hint">Loading schedule…</p>
-                      ) : scheduleSlots.length === 0 ? (
-                        <p className="schedule-hint">No slots are configured for this day.</p>
-                      ) : (
-                        <div className="schedule-slot-list">
-                          {scheduleSlots.map((slot) => (
-                            <label className={`schedule-slot ${slot.booked ? "is-booked" : ""}`} key={slot.time}>
+                    <div className="editor-availability">
+                      <div className="editor-subheading"><strong>Open times for {formatDate(scheduleDate)}</strong><span>Booked times are protected.</span></div>
+                      {slots.length > 0 && (
+                        <div className="editor-slot-list">
+                          {slots.map((slot) => (
+                            <label className={`editor-slot ${slot.booked ? "is-booked" : ""}`} key={slot.time}>
                               <input
                                 type="checkbox"
                                 checked={slot.available || slot.booked}
                                 disabled={slot.booked || saving}
-                                onChange={(event) =>
-                                  setScheduleSlots((previous) =>
-                                    previous.map((item) =>
-                                      item.time === slot.time
-                                        ? { ...item, available: event.target.checked }
-                                        : item,
-                                    ),
-                                  )
-                                }
+                                onChange={(event) => changeDoctorSlots(doctor.id, (current) => current.map((item) => item.time === slot.time ? { ...item, available: event.target.checked } : item))}
                               />
                               <span>{slot.time}</span>
                               {slot.booked && <small>Booked</small>}
@@ -251,37 +282,21 @@ export function DoctorsPanel({ doctors, onUpdated }: Props) {
                           ))}
                         </div>
                       )}
-                      <div className="add-slot-row">
-                        <label>
-                          Add a time
-                          <input type="time" value={newTime} onChange={(event) => setNewTime(event.target.value)} />
-                        </label>
-                        <button type="button" className="editor-secondary" onClick={addTime} disabled={loadingSchedule}>
-                          Add slot
-                        </button>
-                        <button type="button" className="editor-save" onClick={() => void saveSchedule()} disabled={saving || loadingSchedule}>
-                          Save availability
-                        </button>
+                      <div className="editor-add-time">
+                        <label>Add time<input type="time" value={newTime} onChange={(event) => setNewTime(event.target.value)} /></label>
+                        <button className="small-secondary" type="button" onClick={() => addTime(doctor.id)} disabled={saving || slots.some((slot) => slot.time === newTime)}>Add slot</button>
+                        <button className="small-primary" type="button" onClick={() => void saveSchedule(doctor.id)} disabled={saving}>Save schedule</button>
                       </div>
                     </div>
-
-                    {(error || notice) && (
-                      <p className={`editor-feedback ${error ? "has-error" : ""}`} role="status">
-                        {error ?? notice}
-                      </p>
-                    )}
-                    <p className="schedule-hint">Booked times are protected and can&apos;t be removed or changed.</p>
+                    {(scheduleError || notice) && <p className={`editor-feedback ${scheduleError ? "has-error" : ""}`} role="status">{scheduleError ?? notice}</p>}
                   </div>
                 )}
-              </div>
-            </article>
-          );
-        })}
-      </div>
-
-      <div className="panel-footnote">
-        Edit doctor details and daily slots here. The voice agent uses the saved schedule when offering times.
-      </div>
+              </article>
+            );
+          })}
+        </div>
+        </>
+      )}
     </section>
   );
 }

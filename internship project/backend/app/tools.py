@@ -48,6 +48,13 @@ async def check_doctor_availability(
         date: Optional date as YYYY-MM-DD, "today", or "tomorrow". Leave empty for the next three days.
     """
     slots = db.available_slots(doctor=doctor, day=date)
+    await _emit(
+        params,
+        "availability_checked",
+        date=resolve_date(date),
+        doctor=doctor,
+        totalAvailable=len(slots),
+    )
     grouped: dict[str, list[dict]] = {}
     for slot in slots:
         grouped.setdefault(slot.doctor_name, []).append(
@@ -97,8 +104,8 @@ async def set_caller_phone(params: FunctionCallParams, phone: str):
 async def confirm_caller_phone(params: FunctionCallParams):
     """Confirm the proposed phone number after the caller says yes out loud.
 
-    Call this only after repeating the number back and receiving explicit verbal
-    confirmation. It takes no arguments.
+    Call this only after the caller explicitly confirms the number they provided.
+    Never repeat or read the digits back. It takes no arguments.
     """
     resources = _resources(params)
     digits = resources.state.proposed_phone
@@ -163,14 +170,6 @@ async def book_appointment(params: FunctionCallParams, slot_id: str):
 
     name = (state.patient_name or "").strip()
     reason = (state.reason or "").strip()
-    if not name or not reason:
-        await params.result_callback(
-            {
-                "ok": False,
-                "error": "Ask for the caller's full name and what the visit is for before booking.",
-            }
-        )
-        return
 
     try:
         appointment = db.create_appointment(slot_id, phone, name, reason)
@@ -282,7 +281,6 @@ TOOLS = (
     check_doctor_availability,
     set_caller_phone,
     confirm_caller_phone,
-    set_caller_details,
     check_caller_appointments,
     book_appointment,
     cancel_appointment,

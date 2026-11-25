@@ -335,10 +335,6 @@ def create_appointment(
 
     patient_name = " ".join((patient_name or "").split())
     reason = (reason or "").strip()
-    if not patient_name:
-        raise ValueError("A patient name is required.")
-    if not reason:
-        raise ValueError("A reason for the visit is required.")
 
     now = datetime.now(timezone.utc).isoformat()
     appointment = Appointment(

@@ -1,73 +1,118 @@
-import { formatDate } from "../lib/phone";
+import { useState } from "react";
+
+import { formatDate, maskPhone } from "../lib/phone";
 import type { Appointment } from "../lib/types";
 
 type Props = {
   appointments: Appointment[];
   flash: { id: string; kind: "booked" | "cancelled" } | null;
+  loading: boolean;
+  error: string | null;
 };
 
-export function AppointmentsTable({ appointments, flash }: Props) {
-  const visible = appointments.slice(0, 8);
+export function AppointmentsTable({ appointments, flash, loading, error }: Props) {
+  const [visiblePhones, setVisiblePhones] = useState<Set<string>>(() => new Set());
+  const visible = appointments.slice(0, 12);
+  const activeCount = appointments.filter((appointment) => appointment.status === "confirmed").length;
+
+  function togglePhone(id: string) {
+    setVisiblePhones((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   return (
-    <section className="panel appointments-panel" id="appointments">
-      <header className="panel-head">
+    <section className="operations-section appointments-section" id="appointments" aria-labelledby="appointments-title">
+      <header className="section-heading">
         <div>
-          <p className="eyebrow">Live ledger</p>
-          <h2>Appointments</h2>
+          <p className="section-kicker">Visit ledger</p>
+          <h2 id="appointments-title">Appointments</h2>
         </div>
-        <span className="count-badge">{appointments.filter((a) => a.status === "confirmed").length}</span>
+        <span className="section-count">{activeCount} active</span>
       </header>
 
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Caller</th>
-              <th>Doctor</th>
-              <th>When</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.length === 0 ? (
+      {loading && appointments.length === 0 ? (
+        <div className="table-loading" role="status">Loading appointments…</div>
+      ) : error && appointments.length === 0 ? (
+        <div className="section-error" role="alert">Appointment data is unavailable.</div>
+      ) : appointments.length === 0 ? (
+        <div className="empty-state">
+          <span className="empty-mark" aria-hidden="true">—</span>
+          <strong>No appointments yet</strong>
+          <span>Start a call to book an appointment.</span>
+        </div>
+      ) : (
+        <div className="table-scroll">
+          <table className="appointment-table">
+            <thead>
               <tr>
-                <td colSpan={4} className="empty-row">
-                  No appointments yet. Start a call to book the first one.
-                </td>
+                <th scope="col">Reference</th>
+                <th scope="col">Caller</th>
+                <th scope="col">Doctor</th>
+                <th scope="col">Date &amp; time</th>
+                <th scope="col">Status</th>
               </tr>
-            ) : (
-              visible.map((item) => (
-                <tr
-                  key={item.id}
-                  className={`${flash?.id === item.id ? `flash-${flash.kind}` : ""} ${
-                    item.status === "cancelled" ? "row-cancelled" : ""
-                  }`}
-                >
-                  <td>
-                    <span className="caller-cell">
-                      <span className="caller-dot" />
-                      <span className="caller-lines">
-                        <strong>{item.patientName || item.formattedPhone}</strong>
-                        {item.patientName && <small>{item.formattedPhone}</small>}
+            </thead>
+            <tbody>
+              {visible.map((appointment) => {
+                const phoneVisible = visiblePhones.has(appointment.id);
+                return (
+                  <tr
+                    key={appointment.id}
+                    className={`${flash?.id === appointment.id ? `row-flash-${flash.kind}` : ""} ${appointment.status === "cancelled" ? "appointment-cancelled" : ""}`}
+                  >
+                    <td data-label="Reference">
+                      <span className="cell-label">Reference</span>
+                      <code className="appointment-reference">{appointment.id}</code>
+                    </td>
+                    <td data-label="Caller">
+                      <span className="cell-label">Caller</span>
+                      <span className="caller-detail">
+                        <strong>{appointment.patientName || "Caller"}</strong>
+                        <span className="phone-value" title={phoneVisible ? "Phone number visible" : "Phone number masked"}>
+                          {phoneVisible ? appointment.formattedPhone : maskPhone(appointment.formattedPhone)}
+                        </span>
                       </span>
-                    </span>
-                  </td>
-                  <td>{item.doctorName}</td>
-                  <td>
-                    <span className="when-cell">
-                      {formatDate(item.date)} <em>{item.time}</em>
-                    </span>
-                  </td>
-                  <td>
-                    <span className={`status-pill ${item.status}`}>{item.status}</span>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+                      <button
+                        type="button"
+                        className="privacy-toggle"
+                        onClick={() => togglePhone(appointment.id)}
+                        aria-label={`${phoneVisible ? "Mask" : "Reveal"} phone number for ${appointment.patientName || "caller"}`}
+                      >
+                        {phoneVisible ? "Hide" : "Show"}
+                      </button>
+                    </td>
+                    <td data-label="Doctor">
+                      <span className="cell-label">Doctor</span>
+                      <span>{appointment.doctorName}</span>
+                    </td>
+                    <td data-label="Date & time">
+                      <span className="cell-label">Date &amp; time</span>
+                      <time className="appointment-when" dateTime={`${appointment.date}T${appointment.time}`}>
+                        <span>{formatDate(appointment.date)}</span>
+                        <strong>{appointment.time}</strong>
+                      </time>
+                    </td>
+                    <td data-label="Status">
+                      <span className="cell-label">Status</span>
+                      <span className={`status-indicator status-${appointment.status}`}>
+                        <span aria-hidden="true" />
+                        {appointment.status === "confirmed" ? "Confirmed" : "Cancelled"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {appointments.length > visible.length && (
+            <p className="table-footnote">Showing the latest {visible.length} of {appointments.length} appointments.</p>
+          )}
+        </div>
+      )}
     </section>
   );
 }

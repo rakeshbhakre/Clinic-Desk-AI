@@ -11,8 +11,10 @@ type Props = {
 
 function readRecent(): string[] {
   try {
-    const value = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 3) : [];
+    const value: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string").slice(0, 3)
+      : [];
   } catch {
     return [];
   }
@@ -23,11 +25,9 @@ export function PreCallSheet({ onContinue, onCancel }: Props) {
   const [recent, setRecent] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setRecent(readRecent());
-  }, []);
+  useEffect(() => setRecent(readRecent()), []);
 
-  function submit(event: FormEvent) {
+  function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
       const digits = normalizePhone(value);
@@ -42,21 +42,21 @@ export function PreCallSheet({ onContinue, onCancel }: Props) {
 
   return (
     <div className="precall-sheet">
-      <div className="precall-icon" aria-hidden="true">
-        ›
-      </div>
-      <p className="eyebrow">Before we connect</p>
-      <h3>Who&apos;s calling?</h3>
+      <div className="precall-mark" aria-hidden="true">N</div>
+      <p className="call-eyebrow">Before we connect</p>
+      <h2>Start a call</h2>
       <p className="precall-copy">
-        Enter any number to call from. Our agent reads it back and asks you to confirm out loud.
+        Enter a number to use. The agent will ask you to confirm it without reading the digits aloud.
       </p>
 
       <form onSubmit={submit}>
-        <label htmlFor="caller-number">Caller number</label>
+        <label className="call-field-label" htmlFor="caller-number">Caller number</label>
         <input
+          className="call-input"
           id="caller-number"
           type="tel"
           autoComplete="tel"
+          inputMode="tel"
           value={value}
           placeholder="+1 (415) 555-0132"
           onChange={(event) => {
@@ -64,12 +64,13 @@ export function PreCallSheet({ onContinue, onCancel }: Props) {
             setError(null);
           }}
           autoFocus
+          required
         />
-        {error && <p className="field-error">{error}</p>}
+        {error && <p className="call-form-error" role="alert">{error}</p>}
 
         {recent.length > 0 && (
           <div className="recent-numbers">
-            <span>Recent</span>
+            <span>Recent numbers</span>
             {recent.map((item) => (
               <button type="button" key={item} onClick={() => setValue(item)}>
                 {formatPhone(item)}
@@ -78,12 +79,8 @@ export function PreCallSheet({ onContinue, onCancel }: Props) {
           </div>
         )}
 
-        <button className="primary-action" type="submit">
-          Continue to call
-        </button>
-        <button className="ghost-action" type="button" onClick={onCancel}>
-          Not now
-        </button>
+        <button className="call-primary-action" type="submit">Continue</button>
+        <button className="call-quiet-action" type="button" onClick={onCancel}>Cancel</button>
       </form>
     </div>
   );

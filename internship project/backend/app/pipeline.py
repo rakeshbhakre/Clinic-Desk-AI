@@ -36,14 +36,12 @@ Identity rule:
 - Call confirm_caller_phone only after the caller clearly says yes or that is correct.
 - If the caller says no or gives another number, call set_caller_phone and ask "Is that the updated number you'd like to use?" without repeating it.
 
-Caller details rule:
-- After the phone is confirmed, ask for the caller's full name and what the visit is for.
-- Call set_caller_details with both answers before booking. Do not book until it succeeds.
-- If either answer is missing, ask one short follow-up question.
+Caller details:
+- Do not ask for or require a caller name or reason for the visit. The confirmed phone number is sufficient to book.
 
 Booking flow:
 - Use check_doctor_availability for questions about doctors, specialties, dates, or slots.
-- Use book_appointment only after the phone is confirmed, set_caller_details has succeeded, and only with a slot_id returned by the availability tool.
+- Use book_appointment only after the phone is confirmed and only with a slot_id returned by the availability tool.
 - Use check_caller_appointments to find appointments before cancelling.
 - Use cancel_appointment to cancel. If there is more than one appointment, ask which date and time, then call cancel_appointment with its appointment id.
 - When a tool returns an error, say one short sentence and offer the next step.
@@ -125,13 +123,13 @@ async def run_pipeline(transport, state: CallState, runner_args) -> None:
             instruction = (
                 "A caller number was entered before the call. Do not say or expose its digits. "
                 "Start by asking: 'I have the number you entered. Is that the number you'd like to use?' "
-                "Wait for an explicit yes or correction before doing anything else."
+                "Wait for an explicit yes or correction before continuing. Do not ask for a name or visit reason."
             )
         else:
             instruction = (
                 "Start by asking the caller to say the phone number they want to use. "
                 "Do not mention that this is a pre-call number. Never repeat the digits they say. "
-                "After setting the number, ask for confirmation without saying it back."
+                "After setting the number, ask for confirmation without saying it back. Do not ask for a name or visit reason."
             )
         context.add_message({"role": "user", "content": instruction})
         await worker.queue_frames([LLMRunFrame()])

@@ -27,6 +27,16 @@ export type DoctorSchedule = {
   slots: DoctorScheduleSlot[];
 };
 
+export type AgentActivityState = "listening" | "thinking" | "speaking" | "executing_tool";
+
+export type AgentActivityItem = {
+  id: string;
+  label: string;
+  detail?: string;
+  kind: "neutral" | "success" | "warning";
+  at: number;
+};
+
 export type Appointment = {
   id: string;
   doctorId: string;
@@ -51,9 +61,10 @@ export type Bootstrap = {
 export type CallStatus =
   | "idle"
   | "precall"
-  | "ringing"
+  | "requesting_permission"
   | "connecting"
   | "connected"
+  | "ending"
   | "ended"
   | "error";
 
@@ -62,18 +73,23 @@ export type TranscriptLine = {
   role: "user" | "agent";
   text: string;
   at: number;
+  final: boolean;
 };
 
 export type ServerEvent = {
   type:
     | "caller_confirmed"
     | "caller_details"
+    | "availability_checked"
     | "appointment_created"
     | "appointment_cancelled";
   phone?: string;
   formattedPhone?: string;
   name?: string;
   reason?: string;
+  date?: string | null;
+  doctor?: string;
+  totalAvailable?: number;
   appointment?: Appointment;
 };
 
