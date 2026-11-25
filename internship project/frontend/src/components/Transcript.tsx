@@ -40,7 +40,7 @@ export function Transcript({ lines }: Props) {
           lines.map((line) => (
             <article className={`transcript-line ${line.role} ${line.final ? "" : "is-interim"}`} key={line.id}>
               <div className="transcript-meta">
-                <span>{line.role === "user" ? "You" : "Nexov-AI"}</span>
+                <span>{line.role === "user" ? "Caller" : "Ava"}</span>
                 <time dateTime={new Date(line.at).toISOString()}>{timestamp(line.at)}</time>
               </div>
               <p>{line.text}</p>

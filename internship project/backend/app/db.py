@@ -93,6 +93,10 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE appointments ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
             )
+        if "caller_name" not in columns:
+            conn.execute(
+                "ALTER TABLE appointments ADD COLUMN caller_name TEXT NOT NULL DEFAULT ''"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_appt_phone ON appointments(phone, status)"
         )
@@ -173,6 +177,13 @@ def update_doctor(doctor_id: str, name: str, specialty: str) -> dict | None:
         row = conn.execute(
             "SELECT id, name, specialty FROM doctors WHERE id = ?", (doctor_id,)
         ).fetchone()
+        if cursor.rowcount and row:
+            # Active bookings refer to the same doctor id. Keep their displayed name
+            # aligned with the editable doctor profile so the schedule has one name.
+            conn.execute(
+                "UPDATE appointments SET doctor_name = ? WHERE doctor_id = ? AND status = 'confirmed'",
+                (name, doctor_id),
+            )
     return Doctor(row["id"], row["name"], row["specialty"]).to_dict() if row else None
 
 
@@ -320,6 +331,7 @@ def _row_to_appointment(row: sqlite3.Row) -> Appointment:
         created_at=row["created_at"],
         patient_name=row["patient_name"] or "",
         reason=row["reason"] or "",
+        caller_name=row["caller_name"] or "",
     )
 
 
@@ -328,12 +340,14 @@ def create_appointment(
     phone: str,
     patient_name: str = "",
     reason: str = "",
+    caller_name: str = "",
 ) -> Appointment:
     slot = get_slot(slot_id)
     if not slot:
         raise ValueError("That slot does not exist.")
 
     patient_name = " ".join((patient_name or "").split())
+    caller_name = " ".join((caller_name or "").split())
     reason = (reason or "").strip()
 
     now = datetime.now(timezone.utc).isoformat()
@@ -349,6 +363,7 @@ def create_appointment(
         created_at=now,
         patient_name=patient_name,
         reason=reason,
+        caller_name=caller_name,
     )
 
     with _lock, _connect() as conn:
@@ -362,8 +377,8 @@ def create_appointment(
             """
             INSERT INTO appointments
                 (id, doctor_id, doctor_name, slot_id, date, time, phone, status, created_at,
-                 patient_name, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 patient_name, reason, caller_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 appointment.id,
@@ -377,6 +392,7 @@ def create_appointment(
                 appointment.created_at,
                 appointment.patient_name,
                 appointment.reason,
+                appointment.caller_name,
             ),
         )
     return appointment

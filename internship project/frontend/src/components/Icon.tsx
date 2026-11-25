@@ -14,7 +14,12 @@ type IconName =
   | "phone-off"
   | "check"
   | "clock"
-  | "filter";
+  | "filter"
+  | "smartphone"
+  | "search"
+  | "more"
+  | "copy"
+  | "chevron-down";
 
 type Props = { name: IconName; size?: number; className?: string };
 
@@ -33,6 +38,11 @@ const paths: Record<IconName, ReactNode> = {
   check: <><path d="m5 12 4 4L19 6" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   filter: <><path d="M4 7h16M7 12h10m-7 5h4" /><circle cx="8" cy="7" r="1" /><circle cx="14" cy="12" r="1" /><circle cx="10" cy="17" r="1" /></>,
+  smartphone: <><rect x="6" y="2" width="12" height="20" rx="2" /><path d="M11 18h2" /></>,
+  search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 5 5" /></>,
+  more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
+  copy: <><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
+  "chevron-down": <><path d="m6 9 6 6 6-6" /></>,
 };
 
 export function Icon({ name, size = 18, className }: Props) {

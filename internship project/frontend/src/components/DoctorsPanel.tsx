@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { api } from "../lib/api";
 import { formatDate } from "../lib/phone";
@@ -11,7 +11,6 @@ type Props = {
   bootstrapError: string | null;
   refreshKey: number;
   onUpdated: () => void;
-  onOpenSlotCount: (count: number) => void;
 };
 
 function localDate(value = new Date()) {
@@ -28,38 +27,40 @@ function shiftDate(value: string, days: number) {
 }
 
 function initials(name: string) {
-  return name
-    .replace(/^Dr\.\s*/i, "")
-    .split(/\s+/)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  return name.replace(/^Dr\.\s*/i, "").split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
 }
 
-export function DoctorsPanel({ doctors, loading, bootstrapError, refreshKey, onUpdated, onOpenSlotCount }: Props) {
+export function DoctorsPanel({ doctors, loading, bootstrapError, refreshKey, onUpdated }: Props) {
   const [scheduleDate, setScheduleDate] = useState(() => localDate());
   const [scheduleByDoctor, setScheduleByDoctor] = useState<Record<string, DoctorScheduleSlot[]>>({});
   const [loadingSchedule, setLoadingSchedule] = useState(true);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [specialtyFilter, setSpecialtyFilter] = useState("all");
+  const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [specialty, setSpecialty] = useState("");
   const [newTime, setNewTime] = useState("17:00");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const returnFocusRef = useRef<HTMLButtonElement | null>(null);
 
   const doctorIds = useMemo(() => doctors.map((doctor) => doctor.id).join(","), [doctors]);
   const specialtyOptions = useMemo(
     () => [...new Set(doctors.map((doctor) => doctor.specialty))].sort((a, b) => a.localeCompare(b)),
     [doctors],
   );
-  const filteredDoctors = doctors.filter(
-    (doctor) => specialtyFilter === "all" || doctor.specialty === specialtyFilter,
-  );
+  const filteredDoctors = doctors.filter((doctor) => {
+    const matchesSpecialty = specialtyFilter === "all" || doctor.specialty === specialtyFilter;
+    const query = search.trim().toLocaleLowerCase();
+    const matchesSearch = !query || `${doctor.name} ${doctor.specialty}`.toLocaleLowerCase().includes(query);
+    return matchesSpecialty && matchesSearch;
+  });
   const today = localDate();
   const lastDay = shiftDate(today, 2);
+  const editingDoctor = doctors.find((doctor) => doctor.id === editingId) ?? null;
+  const editingSlots = editingId ? scheduleByDoctor[editingId] ?? [] : [];
 
   useEffect(() => {
     const ids = doctorIds ? doctorIds.split(",") : [];
@@ -73,46 +74,52 @@ export function DoctorsPanel({ doctors, loading, bootstrapError, refreshKey, onU
     setScheduleError(null);
     Promise.all(ids.map((id) => api.doctorSchedule(id, scheduleDate)))
       .then((schedules) => {
-        if (!current) return;
-        setScheduleByDoctor(Object.fromEntries(schedules.map((schedule) => [schedule.doctorId, schedule.slots])));
+        if (current) setScheduleByDoctor(Object.fromEntries(schedules.map((schedule) => [schedule.doctorId, schedule.slots])));
       })
       .catch((cause) => {
         if (current) setScheduleError(cause instanceof Error ? cause.message : "Could not load doctor schedules.");
       })
-      .finally(() => {
-        if (current) setLoadingSchedule(false);
-      });
-    return () => {
-      current = false;
-    };
+      .finally(() => { if (current) setLoadingSchedule(false); });
+    return () => { current = false; };
   }, [doctorIds, scheduleDate, refreshKey]);
 
   useEffect(() => {
-    const total = Object.values(scheduleByDoctor)
-      .flat()
-      .filter((slot) => slot.available && !slot.booked).length;
-    onOpenSlotCount(total);
-  }, [scheduleByDoctor, onOpenSlotCount]);
+    if (!editingId) return;
+    const dialog = drawerRef.current;
+    dialog?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeEditor();
+      if (event.key !== "Tab" || !dialog) return;
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), select:not([disabled])"));
+      if (!items.length) return;
+      if (event.shiftKey && document.activeElement === items[0]) {
+        event.preventDefault(); items[items.length - 1].focus();
+      } else if (!event.shiftKey && document.activeElement === items[items.length - 1]) {
+        event.preventDefault(); items[0].focus();
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [editingId]);
 
   const changeDoctorSlots = useCallback((doctorId: string, update: (slots: DoctorScheduleSlot[]) => DoctorScheduleSlot[]) => {
-    setScheduleByDoctor((current) => ({
-      ...current,
-      [doctorId]: update(current[doctorId] ?? []),
-    }));
+    setScheduleByDoctor((current) => ({ ...current, [doctorId]: update(current[doctorId] ?? []) }));
   }, []);
 
-  function beginEdit(doctor: Doctor) {
-    if (editingId === doctor.id) {
-      setEditingId(null);
-      setScheduleError(null);
-      setNotice(null);
-      return;
-    }
+  function beginEdit(doctor: Doctor, trigger: HTMLButtonElement) {
+    returnFocusRef.current = trigger;
     setEditingId(doctor.id);
     setName(doctor.name);
     setSpecialty(doctor.specialty);
     setScheduleError(null);
     setNotice(null);
+  }
+
+  function closeEditor() {
+    setEditingId(null);
+    setScheduleError(null);
+    setNotice(null);
+    window.setTimeout(() => returnFocusRef.current?.focus(), 0);
   }
 
   async function saveDoctor(event: FormEvent<HTMLFormElement>) {
@@ -122,180 +129,142 @@ export function DoctorsPanel({ doctors, loading, bootstrapError, refreshKey, onU
     setScheduleError(null);
     setNotice(null);
     try {
-      await api.updateDoctor(editingId, name, specialty);
+      await api.updateDoctor(editingId, name.trim(), specialty.trim());
       setNotice("Doctor details saved.");
       onUpdated();
     } catch (cause) {
       setScheduleError(cause instanceof Error ? cause.message : "Could not save doctor details.");
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   }
 
-  async function saveSchedule(doctorId: string) {
+  async function saveSchedule() {
+    if (!editingId) return;
     setSaving(true);
     setScheduleError(null);
     setNotice(null);
     try {
-      const slots = scheduleByDoctor[doctorId] ?? [];
       const schedule = await api.updateDoctorSchedule(
-        doctorId,
+        editingId,
         scheduleDate,
-        slots.filter((slot) => slot.available || slot.booked).map((slot) => slot.time),
+        editingSlots.filter((slot) => slot.available || slot.booked).map((slot) => slot.time),
       );
-      setScheduleByDoctor((current) => ({ ...current, [doctorId]: schedule.slots }));
+      setScheduleByDoctor((current) => ({ ...current, [editingId]: schedule.slots }));
       setNotice("Availability saved.");
       onUpdated();
     } catch (cause) {
       setScheduleError(cause instanceof Error ? cause.message : "Could not save availability.");
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   }
 
-  function addTime(doctorId: string) {
-    if ((scheduleByDoctor[doctorId] ?? []).some((slot) => slot.time === newTime)) return;
-    changeDoctorSlots(doctorId, (slots) =>
-      [...slots, { time: newTime, available: true, booked: false }].sort((a, b) => a.time.localeCompare(b.time)),
-    );
+  function addTime() {
+    if (!editingId || editingSlots.some((slot) => slot.time === newTime)) return;
+    changeDoctorSlots(editingId, (slots) => [...slots, { time: newTime, available: true, booked: false }].sort((a, b) => a.time.localeCompare(b.time)));
   }
 
   return (
-    <section className="operations-section doctors-section" id="doctors" aria-labelledby="doctors-title">
-      <header className="section-heading schedule-heading">
-        <div>
-          <p className="section-kicker">Clinical schedule</p>
-          <h2 id="doctors-title">Doctors</h2>
-        </div>
-        <div className="schedule-tools">
-          <div className="date-stepper" aria-label="Schedule date">
-            <button
-              className="icon-button"
-              type="button"
-              onClick={() => setScheduleDate(shiftDate(scheduleDate, -1))}
-              disabled={scheduleDate <= today}
-              aria-label="Previous day"
-            ><Icon name="chevron-left" size={16} /></button>
-            <label>
-              <span className="sr-only">Schedule date</span>
-              <input
-                type="date"
-                value={scheduleDate}
-                min={today}
-                max={lastDay}
-                onChange={(event) => setScheduleDate(event.target.value)}
-              />
-            </label>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={() => setScheduleDate(shiftDate(scheduleDate, 1))}
-              disabled={scheduleDate >= lastDay}
-              aria-label="Next day"
-            ><Icon name="chevron-right" size={16} /></button>
-          </div>
-          <label className="specialty-filter">
-            <Icon name="filter" size={15} />
-            <span className="sr-only">Filter by specialty</span>
-            <select value={specialtyFilter} onChange={(event) => setSpecialtyFilter(event.target.value)}>
-              <option value="all">All specialties</option>
-              {specialtyOptions.map((option) => <option key={option} value={option}>{option}</option>)}
-            </select>
-          </label>
-        </div>
+    <section className="management-page doctors-page" aria-labelledby="doctors-title">
+      <header className="management-heading">
+        <div><p className="eyebrow">Clinical schedule</p><h1 id="doctors-title">Doctors</h1></div>
+        <span className="heading-meta">{doctors.length} {doctors.length === 1 ? "doctor" : "doctors"}</span>
       </header>
 
-      <div className="doctor-schedule-head" aria-hidden="true">
-        <span>Doctor</span><span>Schedule · {scheduleDate === today ? "Today" : formatDate(scheduleDate)}</span><span>Manage</span>
+      <div className="management-toolbar">
+        <label className="search-field">
+          <Icon name="search" size={17} /><span className="sr-only">Search doctors</span>
+          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search doctors" />
+        </label>
+        <label className="filter-field">
+          <Icon name="filter" size={16} /><span className="sr-only">Filter by specialty</span>
+          <select value={specialtyFilter} onChange={(event) => setSpecialtyFilter(event.target.value)}>
+            <option value="all">All specialties</option>
+            {specialtyOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+        </label>
+        <div className="date-control" aria-label="Schedule date">
+          <button className="bare-icon-button" type="button" onClick={() => setScheduleDate(shiftDate(scheduleDate, -1))} disabled={scheduleDate <= today} aria-label="Previous day"><Icon name="chevron-left" size={17} /></button>
+          <label><span className="sr-only">Schedule date</span><input type="date" value={scheduleDate} min={today} max={lastDay} onChange={(event) => setScheduleDate(event.target.value)} /></label>
+          <button className="bare-icon-button" type="button" onClick={() => setScheduleDate(shiftDate(scheduleDate, 1))} disabled={scheduleDate >= lastDay} aria-label="Next day"><Icon name="chevron-right" size={17} /></button>
+        </div>
       </div>
 
+      <div className="schedule-caption"><span>Doctor</span><span>Available times · {formatDate(scheduleDate)}</span><span>Manage</span></div>
+
       {loading && doctors.length === 0 ? (
-        <div className="schedule-loading" role="status"><span /> Loading doctors</div>
+        <div className="page-state" role="status">Loading doctors…</div>
       ) : bootstrapError && doctors.length === 0 ? (
-        <div className="section-error" role="alert">Doctor data is unavailable.</div>
+        <div className="page-state is-error" role="alert">Doctor data is unavailable.</div>
+      ) : scheduleError && Object.keys(scheduleByDoctor).length === 0 ? (
+        <div className="page-state is-error" role="alert">{scheduleError}</div>
       ) : loadingSchedule && Object.keys(scheduleByDoctor).length === 0 ? (
-        <div className="schedule-loading" role="status"><span /> Loading schedule</div>
-      ) : scheduleError ? (
-        <div className="section-error" role="alert">{scheduleError}</div>
+        <div className="page-state" role="status">Loading live availability…</div>
       ) : filteredDoctors.length === 0 ? (
-        <div className="empty-state compact-empty"><strong>{doctors.length === 0 ? "No doctors are available." : "No doctors match this specialty."}</strong></div>
+        <div className="page-state">{doctors.length ? "No doctors match your search." : "No doctors are available."}</div>
       ) : (
-        <>
-        {loadingSchedule && <p className="schedule-refresh" role="status">Updating availability</p>}
-        <div className="doctor-schedule-list">
+        <div className="doctor-list" aria-busy={loadingSchedule}>
           {filteredDoctors.map((doctor, index) => {
             const slots = scheduleByDoctor[doctor.id] ?? [];
             const openCount = slots.filter((slot) => slot.available && !slot.booked).length;
-            const isEditing = editingId === doctor.id;
             return (
-              <article className="doctor-schedule-row" key={doctor.id}>
+              <article className="doctor-row" key={doctor.id}>
                 <div className="doctor-identity">
-                  <span className={`doctor-avatar tone-${index % 4}`} aria-hidden="true">{initials(doctor.name)}</span>
-                  <span className="doctor-identity-copy"><strong>{doctor.name}</strong><small>{doctor.specialty}</small></span>
+                  <span className={`doctor-avatar doctor-tone-${index % 4}`} aria-hidden="true">{initials(doctor.name)}</span>
+                  <span><strong>{doctor.name}</strong><small>{doctor.specialty}</small></span>
                 </div>
-                <div className="doctor-time-area">
-                  {slots.length === 0 ? (
-                    <span className="schedule-empty">No slots scheduled</span>
-                  ) : (
-                    <div className="schedule-time-list">
-                      {slots.map((slot) => {
-                        const status = slot.booked ? "booked" : slot.available ? "open" : "closed";
-                        const label = slot.booked ? "Booked" : slot.available ? "Open" : "Closed";
-                        return (
-                          <span className={`schedule-time schedule-time-${status}`} key={slot.time}>
-                            <strong>{slot.time}</strong><small>{label}</small>
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
+                <div className="doctor-slots">
+                  {slots.length === 0 ? <span className="quiet-label">No times listed</span> : slots.map((slot) => (
+                    <span className={`slot-label ${slot.booked ? "is-booked" : slot.available ? "is-open" : "is-closed"}`} key={slot.time}>
+                      <strong>{slot.time}</strong><small>{slot.booked ? "Booked" : slot.available ? "Available" : "Closed"}</small>
+                    </span>
+                  ))}
                 </div>
-                <div className="doctor-row-action">
-                  <span className="doctor-open-count">{openCount} open</span>
-                  <button className="text-button" type="button" onClick={() => beginEdit(doctor)} aria-expanded={isEditing}>
-                    {isEditing ? "Done" : "Edit"}
-                  </button>
+                <div className="doctor-row-manage">
+                  <span>{openCount} open</span>
+                  <button className="text-action" type="button" aria-label={`Edit ${doctor.name} and availability`} onClick={(event) => beginEdit(doctor, event.currentTarget)}>Edit</button>
                 </div>
-
-                {isEditing && (
-                  <div className="doctor-editor">
-                    <form className="doctor-profile-form" onSubmit={saveDoctor}>
-                      <label>Doctor name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required /></label>
-                      <label>Specialty<input value={specialty} onChange={(event) => setSpecialty(event.target.value)} maxLength={100} required /></label>
-                      <button className="small-primary" type="submit" disabled={saving}>Save details</button>
-                    </form>
-                    <div className="editor-availability">
-                      <div className="editor-subheading"><strong>Open times for {formatDate(scheduleDate)}</strong><span>Booked times are protected.</span></div>
-                      {slots.length > 0 && (
-                        <div className="editor-slot-list">
-                          {slots.map((slot) => (
-                            <label className={`editor-slot ${slot.booked ? "is-booked" : ""}`} key={slot.time}>
-                              <input
-                                type="checkbox"
-                                checked={slot.available || slot.booked}
-                                disabled={slot.booked || saving}
-                                onChange={(event) => changeDoctorSlots(doctor.id, (current) => current.map((item) => item.time === slot.time ? { ...item, available: event.target.checked } : item))}
-                              />
-                              <span>{slot.time}</span>
-                              {slot.booked && <small>Booked</small>}
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                      <div className="editor-add-time">
-                        <label>Add time<input type="time" value={newTime} onChange={(event) => setNewTime(event.target.value)} /></label>
-                        <button className="small-secondary" type="button" onClick={() => addTime(doctor.id)} disabled={saving || slots.some((slot) => slot.time === newTime)}>Add slot</button>
-                        <button className="small-primary" type="button" onClick={() => void saveSchedule(doctor.id)} disabled={saving}>Save schedule</button>
-                      </div>
-                    </div>
-                    {(scheduleError || notice) && <p className={`editor-feedback ${scheduleError ? "has-error" : ""}`} role="status">{scheduleError ?? notice}</p>}
-                  </div>
-                )}
               </article>
             );
           })}
         </div>
-        </>
+      )}
+
+      {editingDoctor && (
+        <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeEditor(); }}>
+          <aside className="edit-drawer" role="dialog" aria-modal="true" aria-labelledby="edit-doctor-title" tabIndex={-1} ref={drawerRef}>
+            <header className="drawer-heading">
+              <div><p className="eyebrow">Doctor details</p><h2 id="edit-doctor-title">Edit availability</h2></div>
+              <button className="bare-icon-button" type="button" onClick={closeEditor} aria-label="Close editor"><Icon name="close" size={19} /></button>
+            </header>
+
+            <form className="doctor-details-form" onSubmit={saveDoctor}>
+              <label>Doctor name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required /></label>
+              <label>Specialty<input value={specialty} onChange={(event) => setSpecialty(event.target.value)} maxLength={100} required /></label>
+              <button className="secondary-action" type="submit" disabled={saving}>Save details</button>
+            </form>
+
+            <section className="drawer-schedule" aria-labelledby="drawer-schedule-title">
+              <div className="drawer-section-heading"><h3 id="drawer-schedule-title">Schedule · {formatDate(scheduleDate)}</h3><p>Confirmed appointments are protected.</p></div>
+              <div className="drawer-slot-list">
+                {editingSlots.map((slot) => (
+                  <label className={`drawer-slot ${slot.booked ? "is-booked" : ""}`} key={slot.time}>
+                    <input type="checkbox" checked={slot.available || slot.booked} disabled={slot.booked || saving} onChange={(event) => changeDoctorSlots(editingDoctor.id, (slots) => slots.map((item) => item.time === slot.time ? { ...item, available: event.target.checked } : item))} />
+                    <span>{slot.time}</span><small>{slot.booked ? "Booked" : slot.available ? "Open" : "Closed"}</small>
+                  </label>
+                ))}
+              </div>
+              <div className="add-slot-row">
+                <label>Add a time<input type="time" value={newTime} onChange={(event) => setNewTime(event.target.value)} /></label>
+                <button className="tertiary-action" type="button" onClick={addTime} disabled={saving || editingSlots.some((slot) => slot.time === newTime)}>Add slot</button>
+              </div>
+              {scheduleError && <p className="form-feedback is-error" role="alert">{scheduleError}</p>}
+              {notice && <p className="form-feedback" role="status">{notice}</p>}
+            </section>
+
+            <footer className="drawer-footer">
+              <button className="quiet-action" type="button" onClick={closeEditor}>Cancel</button>
+              <button className="primary-action" type="button" onClick={() => void saveSchedule()} disabled={saving}>{saving ? "Saving…" : "Save availability"}</button>
+            </footer>
+          </aside>
+        </div>
       )}
     </section>
   );

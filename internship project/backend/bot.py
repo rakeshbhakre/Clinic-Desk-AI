@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import logging
 import sys
 from pathlib import Path
 
@@ -15,34 +13,11 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from app.models import CallState
-from app.phone import normalize_phone
 from app.pipeline import run_pipeline
 from app.routes import router
 
-logger = logging.getLogger("bot")
-
 # Dashboard API lives on the same FastAPI server that owns WebRTC signaling.
 runner_app.include_router(router)
-
-
-def _proposed_phone(runner_args: RunnerArguments) -> str | None:
-    body = getattr(runner_args, "body", None)
-    if isinstance(body, str):
-        try:
-            body = json.loads(body)
-        except json.JSONDecodeError:
-            body = None
-    if not isinstance(body, dict):
-        return None
-
-    raw = body.get("proposed_phone") or body.get("display_phone") or body.get("phone")
-    if not raw:
-        return None
-    try:
-        return normalize_phone(str(raw))
-    except ValueError:
-        logger.warning("Ignoring invalid pre-call phone number")
-        return None
 
 
 async def bot(runner_args: RunnerArguments) -> None:
@@ -55,7 +30,9 @@ async def bot(runner_args: RunnerArguments) -> None:
         webrtc_connection=runner_args.webrtc_connection,
     )
 
-    state = CallState(proposed_phone=_proposed_phone(runner_args))
+    # A browser cannot identify the caller. The only usable phone number is one
+    # the caller speaks and confirms through set_caller_phone/confirm_caller_phone.
+    state = CallState()
     await run_pipeline(transport, state, runner_args)
 
 

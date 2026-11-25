@@ -47,6 +47,7 @@ export type Appointment = {
   phone: string;
   formattedPhone: string;
   patientName: string;
+  callerName: string;
   reason: string;
   status: "confirmed" | "cancelled";
   createdAt: string;
@@ -60,7 +61,6 @@ export type Bootstrap = {
 
 export type CallStatus =
   | "idle"
-  | "precall"
   | "requesting_permission"
   | "connecting"
   | "connected"
@@ -80,12 +80,16 @@ export type ServerEvent = {
   type:
     | "caller_confirmed"
     | "caller_details"
+    | "patient_name_confirmed"
+    | "booking_names_collected"
     | "availability_checked"
     | "appointment_created"
     | "appointment_cancelled";
   phone?: string;
   formattedPhone?: string;
   name?: string;
+  callerName?: string | null;
+  patientName?: string | null;
   reason?: string;
   date?: string | null;
   doctor?: string;

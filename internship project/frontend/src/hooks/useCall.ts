@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RTVIEvent } from "@pipecat-ai/client-js";
 
-import { formatPhone, normalizePhone } from "../lib/phone";
 import type {
   AgentActivityItem,
   AgentActivityState,
@@ -37,6 +36,10 @@ function activityFromEvent(event: ServerEvent): Omit<AgentActivityItem, "id" | "
   if (event.type === "caller_confirmed") {
     return { label: "Phone confirmed", detail: "Verbal confirmation received", kind: "success" };
   }
+  if (event.type === "booking_names_collected") {
+    if (!event.callerName && !event.patientName) return null;
+    return { label: "Booking names recorded", detail: "Optional details saved", kind: "neutral" };
+  }
   if (event.type === "availability_checked") {
     const count = event.totalAvailable ?? 0;
     const date = event.date ? new Date(`${event.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : null;
@@ -66,15 +69,18 @@ function activityFromEvent(event: ServerEvent): Omit<AgentActivityItem, "id" | "
 export function useCall({ onEvent }: Options = {}) {
   const [status, setStatus] = useState<CallStatus>("idle");
   const [activityState, setActivityState] = useState<AgentActivityState>("listening");
-  const [proposedPhone, setProposedPhone] = useState<string | null>(null);
   const [verifiedPhone, setVerifiedPhone] = useState<string | null>(null);
   const [callerName, setCallerName] = useState<string | null>(null);
+  const [patientName, setPatientName] = useState<string | null>(null);
+  const [requestedDoctor, setRequestedDoctor] = useState<string | null>(null);
+  const [requestedDate, setRequestedDate] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [activity, setActivity] = useState<AgentActivityItem[]>([]);
   const [seconds, setSeconds] = useState(0);
   const [levels, setLevels] = useState<AudioLevels>({ local: 0, remote: 0 });
   const [muted, setMuted] = useState(false);
   const [confirmation, setConfirmation] = useState<Appointment | null>(null);
+  const [cancellation, setCancellation] = useState<Appointment | null>(null);
   const [bookedCount, setBookedCount] = useState(0);
   const [cancelledCount, setCancelledCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -176,20 +182,33 @@ export function useCall({ onEvent }: Options = {}) {
     if (payload.type === "caller_confirmed") {
       setVerifiedPhone(payload.formattedPhone ?? payload.phone ?? null);
     }
-    if (payload.type === "caller_details") setCallerName(payload.name ?? null);
+    if (payload.type === "booking_names_collected") {
+      setCallerName(payload.callerName ?? null);
+      setPatientName(payload.patientName ?? null);
+    }
+    if (payload.type === "patient_name_confirmed") setPatientName(payload.patientName ?? null);
+    if (payload.type === "caller_details") setPatientName(payload.name ?? null);
+    if (payload.type === "availability_checked") {
+      setRequestedDoctor(payload.doctor?.trim() || null);
+      setRequestedDate(payload.date ?? null);
+    }
     if (payload.type === "appointment_created" && payload.appointment) {
       setConfirmation(payload.appointment);
+      setCancellation(null);
       setBookedCount((value) => value + 1);
     }
-    if (payload.type === "appointment_cancelled") setCancelledCount((value) => value + 1);
+    if (payload.type === "appointment_cancelled" && payload.appointment) {
+      setCancellation(payload.appointment);
+      setConfirmation(null);
+      setCancelledCount((value) => value + 1);
+    }
     addActivity(payload);
     onEventRef.current?.(payload);
   }, [addActivity]);
 
   const start = useCallback(
-    (rawPhone: string) => {
+    () => {
       if (["requesting_permission", "connecting", "connected", "ending"].includes(statusRef.current)) return;
-      const digits = normalizePhone(rawPhone);
       const startId = ++startIdRef.current;
 
       if (pendingRef.current !== null) window.clearTimeout(pendingRef.current);
@@ -203,12 +222,15 @@ export function useCall({ onEvent }: Options = {}) {
       currentBotLineRef.current = null;
       seenActivityRef.current.clear();
       seenServerEventsRef.current.clear();
-      setProposedPhone(formatPhone(digits));
       setVerifiedPhone(null);
       setCallerName(null);
+      setPatientName(null);
+      setRequestedDoctor(null);
+      setRequestedDate(null);
       setTranscript([]);
       setActivity([]);
       setConfirmation(null);
+      setCancellation(null);
       setSeconds(0);
       setLevels({ local: 0, remote: 0 });
       setMuted(false);
@@ -322,7 +344,7 @@ export function useCall({ onEvent }: Options = {}) {
             requestData: {
               transport: "webrtc",
               enableDefaultIceServers: true,
-              body: { proposed_phone: digits },
+              body: {},
             },
           });
         } catch (cause) {
@@ -355,11 +377,6 @@ export function useCall({ onEvent }: Options = {}) {
     }, 1200);
   }, [clearConnectTimeout, stopTimer, updateStatus]);
 
-  const open = useCallback(() => {
-    setError(null);
-    updateStatus("precall");
-  }, [updateStatus]);
-
   const reset = useCallback(() => {
     startIdRef.current += 1;
     if (pendingRef.current !== null) window.clearTimeout(pendingRef.current);
@@ -373,12 +390,15 @@ export function useCall({ onEvent }: Options = {}) {
     updateStatus("idle");
     setActivityState("listening");
     setError(null);
-    setProposedPhone(null);
     setVerifiedPhone(null);
     setCallerName(null);
+    setPatientName(null);
+    setRequestedDoctor(null);
+    setRequestedDate(null);
     setTranscript([]);
     setActivity([]);
     setConfirmation(null);
+    setCancellation(null);
     setSeconds(0);
     setLevels({ local: 0, remote: 0 });
     setMuted(false);
@@ -411,19 +431,21 @@ export function useCall({ onEvent }: Options = {}) {
   return {
     status,
     activityState,
-    proposedPhone,
     verifiedPhone,
     callerName,
+    patientName,
+    requestedDoctor,
+    requestedDate,
     transcript,
     activity,
     seconds,
     levels,
     muted,
     confirmation,
+    cancellation,
     bookedCount,
     cancelledCount,
     error,
-    open,
     start,
     end,
     reset,

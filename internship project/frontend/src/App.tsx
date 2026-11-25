@@ -1,136 +1,175 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AppHeader, type WorkspaceTab } from "./components/AppHeader";
 import { AppointmentsTable } from "./components/AppointmentsTable";
 import { CallWidget } from "./components/CallWidget";
 import { DoctorsPanel } from "./components/DoctorsPanel";
 import { Icon } from "./components/Icon";
-import { Sidebar } from "./components/Sidebar";
+import { SessionInfo } from "./components/SessionInfo";
+import { Transcript } from "./components/Transcript";
+import { VoiceOrb } from "./components/VoiceOrb";
 import { useAppointments } from "./hooks/useAppointments";
 import { useCall } from "./hooks/useCall";
-import type { ServerEvent } from "./lib/types";
+import type { Appointment, ServerEvent } from "./lib/types";
 
-type Section = "overview" | "doctors" | "appointments";
+type Notification = { appointment: Appointment; message: string } | null;
+
+function callLabel(status: ReturnType<typeof useCall>["status"]) {
+  if (status === "requesting_permission") return "Requesting microphone access";
+  if (status === "connecting") return "Connecting to Ava";
+  if (status === "connected") return "Connected";
+  if (status === "ending") return "Ending call";
+  if (status === "ended") return "Call ended";
+  if (status === "error") return "Connection issue";
+  return "Ready for a call";
+}
 
 export default function App() {
-  const { doctors, appointments, activeCount, loading, error, flash, revision, refresh, highlight } =
-    useAppointments();
-  const [openSlotCount, setOpenSlotCount] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [activeSection, setActiveSection] = useState<Section>("overview");
-  const tryCallButtonRef = useRef<HTMLButtonElement | null>(null);
-  const hadOpenCall = useRef(false);
-  const closeMenu = useCallback(() => setMenuOpen(false), []);
+  const { doctors, appointments, loading, error, flash, revision, refresh, highlight } = useAppointments();
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("workspace");
+  const [mobileViewOpen, setMobileViewOpen] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(min-width: 1100px)").matches,
+  );
+  const [notification, setNotification] = useState<Notification>(null);
+  const [selectedAppointmentId, setSelectedAppointmentId] = useState<string | null>(null);
+  const notificationTimer = useRef<number | null>(null);
 
   const handleEvent = useCallback((event: ServerEvent) => {
     if (event.type !== "appointment_created" && event.type !== "appointment_cancelled") return;
     void refresh();
-    if (event.appointment) {
-      highlight(event.appointment.id, event.type === "appointment_created" ? "booked" : "cancelled");
-    }
-  }, [refresh, highlight]);
+    if (!event.appointment) return;
+    const booked = event.type === "appointment_created";
+    highlight(event.appointment.id, booked ? "booked" : "cancelled");
+    setNotification({
+      appointment: event.appointment,
+      message: booked ? "Appointment confirmed" : "Appointment cancelled",
+    });
+    if (notificationTimer.current !== null) window.clearTimeout(notificationTimer.current);
+    notificationTimer.current = window.setTimeout(() => setNotification(null), 6500);
+  }, [highlight, refresh]);
 
   const call = useCall({ onEvent: handleEvent });
-  const callOpen = call.status !== "idle";
-  const serviceStatus = call.status === "connected"
-    ? "Agent connected"
-    : ["requesting_permission", "connecting"].includes(call.status)
-      ? "Call connecting"
-      : loading
-        ? "Checking service"
-        : error
-          ? "Backend unavailable"
-          : "Backend available";
+  const callInProgress = ["requesting_permission", "connecting", "connected", "ending"].includes(call.status);
 
-  useEffect(() => {
-    if (callOpen) hadOpenCall.current = true;
-    else if (hadOpenCall.current) {
-      hadOpenCall.current = false;
-      tryCallButtonRef.current?.focus();
-    }
-  }, [callOpen]);
-  const today = new Intl.DateTimeFormat(undefined, {
-    weekday: "long", month: "long", day: "numeric", year: "numeric",
-  }).format(new Date());
-
-  useEffect(() => {
-    const sections = ["overview", "doctors", "appointments"]
-      .map((id) => document.getElementById(id))
-      .filter((element): element is HTMLElement => Boolean(element));
-    const observer = new IntersectionObserver((entries) => {
-      const visible = entries.filter((entry) => entry.isIntersecting)
-        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-      if (visible) setActiveSection(visible.target.id as Section);
-    }, { rootMargin: "-64px 0px -58% 0px", threshold: [0, 0.2, 0.5] });
-    sections.forEach((section) => observer.observe(section));
-    return () => observer.disconnect();
+  useEffect(() => () => {
+    if (notificationTimer.current !== null) window.clearTimeout(notificationTimer.current);
   }, []);
 
+  const startCall = useCallback(() => {
+    setMobileViewOpen(true);
+    call.start();
+  }, [call.start]);
+
+  const primaryLabel = call.status === "error"
+    ? "Try again"
+    : call.status === "ended"
+      ? "Start another call"
+      : callInProgress
+        ? call.status === "connected" ? mobileViewOpen ? "Call in progress" : "End call" : "Connecting"
+        : "Start a call";
+  const primaryAction = call.status === "connected" && !mobileViewOpen ? call.end : startCall;
+  const primaryDisabled = ["requesting_permission", "connecting", "ending"].includes(call.status) || (call.status === "connected" && mobileViewOpen);
+
+  const clinicStatus = error
+    ? "Clinic service unavailable"
+    : loading
+      ? "Checking clinic service"
+      : "Clinic service available";
+
+  function viewAppointment(appointmentId: string) {
+    setSelectedAppointmentId(appointmentId);
+    setActiveTab("appointments");
+    setNotification(null);
+  }
+
   return (
-    <div className={`app-shell ${callOpen ? "call-open" : ""}`}>
-      <Sidebar
-        activeSection={activeSection}
-        open={menuOpen}
-        onNavigate={closeMenu}
-        agentReady={!loading && !error}
+    <div className="app-shell">
+      <AppHeader
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        mobileViewOpen={mobileViewOpen}
+        onToggleMobileView={() => setMobileViewOpen((value) => !value)}
       />
 
-      <main className="workspace">
-        <header className="topbar">
-          <button
-            className="mobile-menu icon-button"
-            type="button"
-            onClick={() => setMenuOpen(true)}
-            aria-label="Open navigation"
-            aria-expanded={menuOpen}
-            aria-controls="sidebar-navigation"
-          >
-            <Icon name="menu" />
-          </button>
-          <div className="page-context" id="overview">
-            <p className="eyebrow">{today}</p>
-            <h1>Overview</h1>
+      <main className={`page-content page-${activeTab}`}>
+        {activeTab === "workspace" && (
+          <div className={`workspace-layout ${mobileViewOpen ? "has-phone-view" : "is-centered"}`}>
+            <section className="voice-workspace" aria-labelledby="workspace-title">
+              <p className={`assistant-availability ${error ? "is-unavailable" : loading ? "is-checking" : ""}`} role="status">
+                <span aria-hidden="true" />{clinicStatus}
+              </p>
+
+              <h1 className="editorial-heading" id="workspace-title">
+                Healthcare,<br /><em>made human.</em>
+              </h1>
+
+              <VoiceOrb status={call.status} activity={call.activityState} levels={call.levels} />
+
+              <div className="agent-identity">
+                <span className="agent-monogram" aria-hidden="true">N</span>
+                <div><strong>Ava assistant</strong><span>{callLabel(call.status)}</span></div>
+              </div>
+
+              {call.error && <p className="call-error-message" role="alert">{call.error}</p>}
+
+              <div className="workspace-actions">
+              <button className={`start-call-button ${call.status === "connected" && !mobileViewOpen ? "is-ending-action" : ""}`} type="button" onClick={primaryAction} disabled={primaryDisabled}>
+                <Icon name={call.status === "connected" && !mobileViewOpen ? "phone-off" : "phone"} size={18} />
+                {primaryLabel}
+              </button>
+              {call.status === "connected" && !mobileViewOpen && (
+                <button className="workspace-mute-button" type="button" onClick={call.toggleMute} aria-pressed={call.muted}>
+                  <Icon name={call.muted ? "mic-off" : "mic"} size={17} />{call.muted ? "Unmute" : "Mute"}
+                </button>
+              )}
+              </div>
+
+              <div className="workspace-divider" />
+              <SessionInfo call={call} />
+
+              {!mobileViewOpen && call.status !== "idle" && (
+                <div className="workspace-live-transcript">
+                  <Transcript lines={call.transcript} />
+                </div>
+              )}
+            </section>
+
+            {mobileViewOpen && (
+              <CallWidget call={call} onStart={startCall} onClose={() => setMobileViewOpen(false)} />
+            )}
           </div>
-          <div className="topbar-actions">
-            <div className={`readiness ${error ? "is-unavailable" : ""}`} role="status">
-              <span className="readiness-dot" />
-              {serviceStatus}
-            </div>
-          <button ref={tryCallButtonRef} className="try-call-button" type="button" onClick={call.open} disabled={callOpen}>
-              <Icon name="phone" size={16} />
-              {callOpen ? "Call open" : "Try call"}
-            </button>
-          </div>
-        </header>
+        )}
 
-        {error && <div className="dashboard-error" role="alert">{error}</div>}
-
-        <section className="overview-summary" aria-label="Today at a glance">
-          <div className="summary-intro"><span>Today at a glance</span><small>Live operational data</small></div>
-          <div className="summary-metric"><strong>{doctors.length}</strong><span>Doctors</span></div>
-          <div className="summary-metric"><strong>{openSlotCount}</strong><span>Available slots</span></div>
-          <div className="summary-metric"><strong>{activeCount}</strong><span>Appointments</span></div>
-          {loading && <span className="summary-sync" role="status">Syncing</span>}
-        </section>
-
-        <div className="operations-stack">
+        {activeTab === "doctors" && (
           <DoctorsPanel
             doctors={doctors}
             loading={loading}
             bootstrapError={error}
             refreshKey={revision}
             onUpdated={() => void refresh()}
-            onOpenSlotCount={setOpenSlotCount}
           />
-          <AppointmentsTable appointments={appointments} flash={flash} loading={loading} error={error} />
-        </div>
+        )}
 
-        <footer className="workspace-foot">
-          <span>{error ? "Connection needs attention" : loading ? "Syncing schedule" : "Data synced with the clinic service"}</span>
-          <span>Pipecat <i /> ElevenLabs <i /> OpenRouter</span>
-        </footer>
+        {activeTab === "appointments" && (
+          <AppointmentsTable
+            appointments={appointments}
+            flash={flash}
+            loading={loading}
+            error={error}
+            selectedAppointmentId={selectedAppointmentId}
+            onSelectedAppointment={setSelectedAppointmentId}
+          />
+        )}
       </main>
 
-      <CallWidget call={call} />
+      {notification && (
+        <aside className="appointment-notification" role="status" aria-live="polite">
+          <span className="notification-mark" aria-hidden="true"><Icon name="check" size={16} /></span>
+          <span className="notification-copy"><strong>{notification.message}</strong><small>{notification.appointment.doctorName} · {notification.appointment.date} · {notification.appointment.time}</small></span>
+          <button type="button" onClick={() => viewAppointment(notification.appointment.id)}>View appointment</button>
+          <button className="notification-close" type="button" onClick={() => setNotification(null)} aria-label="Dismiss notification"><Icon name="close" size={16} /></button>
+        </aside>
+      )}
     </div>
   );
 }

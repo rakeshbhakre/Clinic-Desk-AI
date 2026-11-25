@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
@@ -9,6 +11,34 @@ from . import db
 from .dates import resolve_date
 from .models import AppResources, Appointment
 from .phone import format_phone, normalize_phone
+
+_DOCTOR_QUERY_FILLER = {
+    "dr", "doctor", "doctors", "which", "who", "what", "is", "are", "the",
+    "available", "availability", "open", "for", "on", "tomorrow", "today",
+    "any", "all", "slot", "slots", "time", "times", "appointment", "appointments",
+    "can", "could", "you", "tell", "me", "please", "uh", "um", "hmm",
+}
+
+
+def _doctor_terms(value: str) -> str:
+    terms = re.sub(r"[^a-z0-9 ]+", " ", (value or "").lower()).split()
+    return " ".join(term for term in terms if term not in _DOCTOR_QUERY_FILLER)
+
+
+def _doctor_matches(query: str, doctor: dict[str, str]) -> bool:
+    query_terms = _doctor_terms(query)
+    if not query_terms:
+        return False
+    query_tokens = set(query_terms.split())
+    name = _doctor_terms(doctor["name"])
+    specialty = _doctor_terms(doctor["specialty"])
+    searchable = f"{name} {specialty} {_doctor_terms(doctor['id'])}"
+    if query_terms in searchable or query_tokens.issubset(set(searchable.split())):
+        return True
+    # Speech recognition can slightly alter a surname. Only accept a close,
+    # multiword match; otherwise ask the caller instead of falsely saying there
+    # are no appointments for a doctor we could not identify.
+    return len(query_tokens) >= 2 and SequenceMatcher(None, query_terms, name).ratio() >= 0.84
 
 
 async def _emit(params: FunctionCallParams, message_type: str, **payload: Any) -> None:
@@ -47,12 +77,29 @@ async def check_doctor_availability(
         doctor: Optional doctor name, specialty, or id, e.g. "Mehta" or "d1". Leave empty for all doctors.
         date: Optional date as YYYY-MM-DD, "today", or "tomorrow". Leave empty for the next three days.
     """
-    slots = db.available_slots(doctor=doctor, day=date)
+    doctor_records = db.list_doctors()
+    doctor_query = _doctor_terms(doctor)
+    matched_doctors = [item for item in doctor_records if _doctor_matches(doctor, item)] if doctor_query else []
+    if doctor_query and not matched_doctors:
+        await params.result_callback(
+            {
+                "ok": False,
+                "clarification_required": True,
+                "error": "The requested doctor name did not match the clinic's doctor list. Ask the caller to repeat or confirm the doctor's name; do not report zero availability.",
+                "doctors": [{"name": item["name"], "specialty": item["specialty"]} for item in doctor_records],
+                "resolved_date": resolve_date(date),
+            }
+        )
+        return
+
+    doctor_filter = matched_doctors[0]["name"] if len(matched_doctors) == 1 else (doctor if doctor_query else "")
+    requested_doctor = matched_doctors[0]["name"] if len(matched_doctors) == 1 else doctor_filter
+    slots = db.available_slots(doctor=doctor_filter, day=date)
     await _emit(
         params,
         "availability_checked",
         date=resolve_date(date),
-        doctor=doctor,
+        doctor=requested_doctor,
         totalAvailable=len(slots),
     )
     grouped: dict[str, list[dict]] = {}
@@ -69,7 +116,7 @@ async def check_doctor_availability(
             "ok": True,
             "resolved_date": resolve_date(date),
             "doctors": [
-                {"name": name, "available_slots": values[:8]}
+            {"name": name, "available_slots": values[:8]}
                 for name, values in grouped.items()
             ],
             "total_available": len(slots),
@@ -96,16 +143,17 @@ async def set_caller_phone(params: FunctionCallParams, phone: str):
         {
             "ok": True,
             "received": True,
-            "confirmation_prompt": "I have the number you provided. Is that the number you'd like to use?",
+            "spoken_number": format_phone(digits),
+            "confirmation_prompt": f"You said {format_phone(digits)}. Is that the correct number to use?",
         }
     )
 
 
 async def confirm_caller_phone(params: FunctionCallParams):
-    """Confirm the proposed phone number after the caller says yes out loud.
+    """Confirm the proposed phone number after reading it back and the caller says yes.
 
-    Call this only after the caller explicitly confirms the number they provided.
-    Never repeat or read the digits back. It takes no arguments.
+    Call this only after the caller explicitly confirms the number read back to them.
+    It takes no arguments.
     """
     resources = _resources(params)
     digits = resources.state.proposed_phone
@@ -122,31 +170,41 @@ async def confirm_caller_phone(params: FunctionCallParams):
     )
 
 
-async def set_caller_details(params: FunctionCallParams, name: str, reason: str):
-    """Record the caller's full name and reason for the visit.
+async def record_booking_names(
+    params: FunctionCallParams, caller_name: str, patient_name: str
+):
+    """Record names the caller voluntarily provides for a booking.
 
     Args:
-        name: The caller's full name, spoken out loud.
-        reason: A short reason for the appointment, such as "rash on my arm".
+        caller_name: The caller's name, or an empty string if they decline or do not provide it.
+        patient_name: The patient's name, or an empty string if they decline or do not provide it.
+
+    Names are optional metadata and must never be used to verify identity.
     """
     resources = _resources(params)
-    clean_name = " ".join((name or "").split())
-    clean_reason = (reason or "").strip()
-    if not clean_name:
-        await params.result_callback({"ok": False, "error": "Ask the caller for their full name."})
-        return
-    if not clean_reason:
+    clean_caller = " ".join((caller_name or "").split())
+    clean_patient = " ".join((patient_name or "").split())
+    if len(clean_caller) > 120 or len(clean_patient) > 120:
         await params.result_callback(
-            {"ok": False, "error": "Ask what the appointment is for."}
+            {"ok": False, "error": "That name is too long. Ask the caller to repeat it."}
         )
         return
 
-    clean_reason = clean_reason[:160]
-    resources.state.patient_name = clean_name
-    resources.state.reason = clean_reason
-    await _emit(params, "caller_details", name=clean_name, reason=clean_reason)
+    resources.state.caller_name = clean_caller or None
+    resources.state.patient_name = clean_patient or None
+    await _emit(
+        params,
+        "booking_names_collected",
+        callerName=clean_caller or None,
+        patientName=clean_patient or None,
+    )
     await params.result_callback(
-        {"ok": True, "name": clean_name, "reason": clean_reason}
+        {
+            "ok": True,
+            "caller_name": clean_caller or None,
+            "patient_name": clean_patient or None,
+            "optional": True,
+        }
     )
 
 
@@ -168,11 +226,18 @@ async def book_appointment(params: FunctionCallParams, slot_id: str):
         )
         return
 
-    name = (state.patient_name or "").strip()
+    patient_name = (state.patient_name or "").strip()
+    caller_name = (state.caller_name or "").strip()
     reason = (state.reason or "").strip()
 
     try:
-        appointment = db.create_appointment(slot_id, phone, name, reason)
+        appointment = db.create_appointment(
+            slot_id,
+            phone,
+            patient_name=patient_name,
+            reason=reason,
+            caller_name=caller_name,
+        )
     except ValueError as exc:
         await params.result_callback({"ok": False, "error": str(exc)})
         return
@@ -281,6 +346,7 @@ TOOLS = (
     check_doctor_availability,
     set_caller_phone,
     confirm_caller_phone,
+    record_booking_names,
     check_caller_appointments,
     book_appointment,
     cancel_appointment,

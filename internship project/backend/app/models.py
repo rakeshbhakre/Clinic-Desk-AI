@@ -49,6 +49,7 @@ class Appointment:
     created_at: str
     patient_name: str = ""
     reason: str = ""
+    caller_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         from .phone import format_phone
@@ -63,6 +64,7 @@ class Appointment:
             "phone": self.phone,
             "formattedPhone": format_phone(self.phone),
             "patientName": self.patient_name,
+            "callerName": self.caller_name,
             "reason": self.reason,
             "status": self.status,
             "createdAt": self.created_at,
@@ -73,6 +75,7 @@ class Appointment:
 class CallState:
     proposed_phone: str | None = None
     confirmed_phone: str | None = None
+    caller_name: str | None = None
     patient_name: str | None = None
     reason: str | None = None
 
